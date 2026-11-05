@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>VofdReader</title>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6BC2EF"/>
+      <stop offset="0.55" stop-color="#46A7DE"/>
+      <stop offset="1" stop-color="#2E91CE"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.65" stop-color="#F5FAFE"/>
+      <stop offset="1" stop-color="#E8F3FA"/>
+    </linearGradient>
+    <linearGradient id="foldShade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8FCFEC" stop-opacity="0"/>
+      <stop offset="1" stop-color="#5AA9D3" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="vShade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#BFE6F8" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="iconShadow" x="-18%" y="-18%" width="136%" height="142%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#0B344C" flood-opacity="0.24"/>
+    </filter>
+    <filter id="inkShadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#155B80" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+
+  <!-- Layered sheet edges -->
+  <g filter="url(#iconShadow)">
+    <rect x="154" y="886" width="716" height="62" rx="31" fill="#277AAE"/>
+    <rect x="138" y="868" width="748" height="70" rx="35" fill="#3D9ACF"/>
+    <rect x="120" y="76" width="784" height="800" rx="146" fill="url(#paper)"/>
+
+    <!-- Ruled paper lines -->
+    <g stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.28">
+      <path d="M182 238h660"/>
+      <path d="M182 316h660"/>
+      <path d="M182 394h660"/>
+      <path d="M182 472h660"/>
+      <path d="M182 550h660"/>
+      <path d="M182 628h660"/>
+      <path d="M182 706h660"/>
+      <path d="M182 796h660"/>
+    </g>
+
+    <!-- Folded top-right corner -->
+    <path d="M678 76h96c83 0 130 47 130 130v96c-86 0-198-96-226-226z" fill="url(#fold)"/>
+    <path d="M678 76c28 130 140 226 226 226" fill="none" stroke="#D6E8F3" stroke-width="4"/>
+    <path d="M692 92c27 113 116 197 210 208" fill="none" stroke="#FFFFFF" stroke-width="7" opacity="0.9"/>
+    <path d="M702 105c25 94 101 167 187 184" fill="none" stroke="#E2EFF7" stroke-width="3"/>
+    <path d="M688 76c33 127 137 220 220 226" fill="none" stroke="url(#foldShade)" stroke-width="7"/>
+
+    <!-- White V mark -->
+    <g filter="url(#inkShadow)">
+      <ellipse cx="548" cy="332" rx="32" ry="58" fill="none" stroke="#FFFFFF" stroke-width="31"/>
+      <path d="M356 424 548 736 740 424" fill="none" stroke="#FFFFFF" stroke-width="76" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M548 736 740 424" fill="none" stroke="url(#vShade)" stroke-width="12" opacity="0.65"/>
+    </g>
+
+    <!-- Paperclip -->
+    <g transform="translate(744 684) rotate(-34) scale(3.05)" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" opacity="0.96">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+    </g>
+  </g>
+</svg>

@@ -1,5 +1,7 @@
 # VofdReader
 
+<img src="assets/vofdreader.svg" width="96" align="right" alt="VofdReader 图标">
+
 > 用 Rust + GPUI 编写的轻量 OFD 阅读器。只做阅读，把**打开快、翻页顺、字迹清、内存低**做好。
 
 依据国家标准 **GB/T 33190-2016《电子文件存储与交换格式 版式文档》**，许可证 **GPL-3.0-or-later**。
