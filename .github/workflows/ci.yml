@@ -5,31 +5,33 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # Keep in sync with the local development toolchain (rustc -vV).
+  RUST_TOOLCHAIN: nightly-2026-05-29
+
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: test (archlinux)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: System dependencies (GPUI)
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git rustup cmake pkgconf \
+            alsa-lib fontconfig libx11 libxcb libxkbcommon libxkbcommon-x11 \
+            openssl vulkan-icd-loader wayland zstd
+
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Linux system dependencies (GPUI)
-        if: runner.os == 'Linux'
+      - name: Rust toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev libfontconfig1-dev libssl-dev libvulkan-dev \
-            libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb-util-dev \
-            libxcb-image0-dev libxcb-keysyms1-dev libxcb-randr0-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc -vV
 
       - uses: Swatinem/rust-cache@v2
 
@@ -56,9 +58,10 @@ jobs:
         shell: bash
     steps:
       # actions/checkout needs git in the container to keep .git, which
-      # pkgver() and the git source both rely on.
+      # pkgver() and the git source both rely on; desktop-file-utils provides
+      # the desktop-file-validate used below.
       - name: Install git
-        run: pacman -Syu --noconfirm --needed git
+        run: pacman -Syu --noconfirm --needed git desktop-file-utils
 
       - uses: actions/checkout@v4
         with:

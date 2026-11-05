@@ -47,7 +47,7 @@
 
 ## 构建与运行
 
-需要 Rust 工具链。Linux 还需要 Vulkan、Wayland 或 X11、fontconfig 开发库；Ubuntu 依赖见 [CI 配置](.github/workflows/ci.yml)。
+需要 Rust 工具链；CI 固定使用的版本见 [CI 配置](.github/workflows/ci.yml) 中的 `RUST_TOOLCHAIN`。Linux 还需要 Vulkan、Wayland 或 X11、fontconfig 开发库；Arch Linux 依赖同样见该配置。
 
 ```bash
 cargo run -p ofd-app -- resources/y.ofd
