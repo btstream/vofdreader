@@ -15,3 +15,4 @@ MimeType=application/ofd;application/vnd.ofd;
 Keywords=OFD;Document;Reader;
 Keywords[zh_CN]=OFD;文档;阅读器;版式;
 StartupNotify=true
+StartupWMClass=vofdreader

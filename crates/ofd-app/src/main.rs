@@ -110,6 +110,9 @@ impl Palette {
     }
 }
 
+/// Desktop entry name (packaging/linux/vofdreader.desktop) and the window
+/// app_id / WM_CLASS that lets the desktop find the application icon.
+const APP_ID: &str = "vofdreader";
 const THUMB_LIMIT: usize = 80;
 const SEARCH_LIMIT: usize = 120;
 const THUMB_DPI: f32 = 48.0;
@@ -4613,6 +4616,9 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: None,
                 }),
+                // Wayland compositors map the window to its desktop entry by
+                // app_id; without it KDE shows a generic "W" taskbar icon.
+                app_id: Some(APP_ID.into()),
                 ..Default::default()
             };
 
@@ -4623,6 +4629,8 @@ fn main() {
                 let ui_font = ui_font.clone();
                 move |window, cx| {
                     window.set_window_title("VofdReader");
+                    // X11 reads WM_CLASS instead, which is only set here.
+                    window.set_app_id(APP_ID);
                     let dark = settings
                         .appearance
                         .theme
