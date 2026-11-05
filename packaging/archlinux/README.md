@@ -18,6 +18,10 @@ PKGBUILD 设置 `options=('!lto')`。Arch 默认的 `lto` 选项会给 `CFLAGS` 
 
 若需验证尚未推送的本地源码，可在 **PKGBUILD 的副本** 中将 `source` 改为本地 Git 仓库的 `git+file:///绝对路径`；本地修改也必须先提交才能被 Git 源码机制获取。
 
+## CI 自动打包
+
+`.github/workflows/ci.yml` 中的 `archlinux` 任务在 `archlinux:base-devel` 容器内用本 PKGBUILD 构建软件包。它只在推送到 `main` 或手动触发（workflow_dispatch）时运行，并且要等 `test` 任务通过。任务会把 `source` 改为当前检出的提交，所以构建的就是本次 CI 所测的代码；工作区测试已在 `test` 任务中执行，这里使用 `--nocheck`。生成的 `.pkg.tar.zst` 作为构件 `vofdreader-archlinux-x86_64` 上传，可在 Actions 运行页面下载，用 `sudo pacman -U` 安装。
+
 ## 安装内容
 
 - `/usr/bin/ofd-app`：桌面阅读器。

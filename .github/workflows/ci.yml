@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -40,3 +41,76 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  # Builds packaging/archlinux/PKGBUILD against the commit under test and
+  # uploads the .pkg.tar.zst. A release build with thin LTO takes a while,
+  # so this only runs for main and on manual dispatch, after tests pass.
+  archlinux:
+    name: Arch Linux package
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout needs git in the container to keep .git, which
+      # pkgver() and the git source both rely on.
+      - name: Install git
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare build user and local source
+        run: |
+          useradd -m builder
+          git config --system --add safe.directory '*'
+          # The PKGBUILD clones GitHub main; point it at this checkout instead,
+          # through a branch so the commit is reachable even from a detached checkout.
+          git branch -f ci-package HEAD
+          install -d -o builder /build
+          sed "s|^source=.*|source=('vofdreader::git+file://$GITHUB_WORKSPACE#branch=ci-package')|" \
+            packaging/archlinux/PKGBUILD > /build/PKGBUILD
+          chown builder: /build/PKGBUILD
+          grep '^source=' /build/PKGBUILD
+
+      - name: Install build dependencies
+        run: |
+          cd /build
+          mapfile -t deps < <(sudo -u builder makepkg --printsrcinfo \
+            | sed -nE 's/^\s*(make)?depends = //p')
+          pacman -S --noconfirm --needed "${deps[@]}"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry
+            /home/builder/.cargo/git
+          key: archlinux-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: archlinux-cargo-
+
+      - name: Build package
+        run: |
+          install -d -o builder /home/builder/.cargo
+          chown -R builder: /home/builder/.cargo
+          cd /build
+          # Workspace tests already ran in the test job; check() would repeat
+          # them in release mode. Validate the desktop file here instead.
+          desktop-file-validate "$GITHUB_WORKSPACE/packaging/linux/vofdreader.desktop"
+          sudo -u builder makepkg --nocheck --noconfirm
+          ls -l /build/*.pkg.tar.zst
+
+      - name: Inspect package
+        run: |
+          pkg=$(ls /build/*.pkg.tar.zst | grep -v -- '-debug-')
+          pacman -Qip "$pkg"
+          pacman -Qlp "$pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vofdreader-archlinux-x86_64
+          path: /build/*.pkg.tar.zst
+          if-no-files-found: error
