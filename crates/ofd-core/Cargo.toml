@@ -13,12 +13,17 @@ tempfile.workspace = true
 roxmltree.workspace = true
 thiserror.workspace = true
 zip.workspace = true
-# SVG is generated in memory, never read as gzip-compressed SVGZ. Keep text,
+# Same version as GPUI so the desktop app compiles one renderer stack; bump
+# only together with gpui-pre. SVG is generated in memory, never read as
+# gzip-compressed SVGZ. Keep text,
 # system/embedded fonts and raster images; use resvg's matching usvg re-export.
-resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
-base64 = { version = "0.23", default-features = false, features = ["std"] }
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 # Embedded SFNT/CFF outlines, sparse CID mapping, cmaps and collection faces.
 ttf-parser = "0.25"
+# zip only selects Deflate; the pure-Rust backend is the one the rest of the
+# dependency graph already compiles.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Raster decoders for the direct renderer; same versions resvg already uses.
 zune-jpeg = "0.5"
 gif = "0.14"
