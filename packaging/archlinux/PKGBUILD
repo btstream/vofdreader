@@ -1,0 +1,78 @@
+# Maintainer: VofdReader contributors
+pkgname=vofdreader-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Lightweight OFD document reader built with Rust and GPUI'
+arch=('x86_64')
+url='https://github.com/btstream/vofdreader'
+license=('GPL-3.0-or-later')
+depends=(
+  'alsa-lib'
+  'fontconfig'
+  'gcc-libs'
+  'glibc'
+  'libx11'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'openssl'
+  'vulkan-icd-loader'
+  'wayland'
+  'zstd'
+  'hicolor-icon-theme'
+  'shared-mime-info'
+  'desktop-file-utils'
+)
+makedepends=('git' 'rust' 'cargo' 'pkgconf' 'cmake')
+optdepends=(
+  'vulkan-driver: Vulkan implementation for your GPU'
+  'noto-fonts-cjk: CJK fallback fonts for the interface and documents'
+)
+provides=('vofdreader')
+conflicts=('vofdreader')
+source=('vofdreader::git+https://github.com/btstream/vofdreader.git#branch=main')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/vofdreader"
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/vofdreader"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$srcdir/vofdreader"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen -p ofd-app -p ofd-cli
+}
+
+check() {
+  cd "$srcdir/vofdreader"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  desktop-file-validate packaging/linux/vofdreader.desktop
+  cargo test --release --frozen --workspace
+}
+
+package() {
+  cd "$srcdir/vofdreader"
+  install -Dm755 "$srcdir/target/release/ofd-app" "$pkgdir/usr/bin/ofd-app"
+  install -Dm755 "$srcdir/target/release/ofd-cli" "$pkgdir/usr/bin/ofd-cli"
+  install -Dm644 packaging/linux/vofdreader.desktop \
+    "$pkgdir/usr/share/applications/vofdreader.desktop"
+  install -Dm644 packaging/linux/vofdreader-mime.xml \
+    "$pkgdir/usr/share/mime/packages/vofdreader.xml"
+  install -Dm644 assets/vofdreader.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/vofdreader.svg"
+  install -Dm644 assets/application-ofd.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/application-ofd.svg"
+  install -Dm644 assets/application-ofd.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/application-vnd.ofd.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/vofdreader/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

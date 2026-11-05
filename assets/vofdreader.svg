@@ -1,68 +1,77 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" width="547" height="512" viewBox="0 0 547 512" fill="none">
   <title>VofdReader</title>
+  <desc>Blue ruled document with a curled corner, white envelope-shaped V and uppercase O, and a paperclip.</desc>
   <defs>
-    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6BC2EF"/>
-      <stop offset="0.55" stop-color="#46A7DE"/>
-      <stop offset="1" stop-color="#2E91CE"/>
+    <linearGradient id="paper" x1="80" y1="20" x2="482" y2="482" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#59B0E7"/>
+      <stop offset=".55" stop-color="#55ADE4"/>
+      <stop offset="1" stop-color="#51A9E0"/>
     </linearGradient>
-    <linearGradient id="fold" x1="0" y1="0" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="0.65" stop-color="#F5FAFE"/>
-      <stop offset="1" stop-color="#E8F3FA"/>
+    <linearGradient id="edge" x1="285" y1="420" x2="285" y2="500" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#59B1E5"/>
+      <stop offset="1" stop-color="#3595CC"/>
     </linearGradient>
-    <linearGradient id="foldShade" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#8FCFEC" stop-opacity="0"/>
-      <stop offset="1" stop-color="#5AA9D3" stop-opacity="0.55"/>
+    <linearGradient id="curl" x1="467" y1="36" x2="435" y2="102" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D5DFE7"/>
+      <stop offset=".43" stop-color="#F0F4F7"/>
+      <stop offset="1" stop-color="#FFFFFF"/>
     </linearGradient>
-    <linearGradient id="vShade" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
-      <stop offset="1" stop-color="#BFE6F8" stop-opacity="0.9"/>
+    <linearGradient id="curlBack" x1="454" y1="17" x2="500" y2="92" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset=".7" stop-color="#E7EDF2"/>
+      <stop offset="1" stop-color="#C3D3DF"/>
     </linearGradient>
-    <filter id="iconShadow" x="-18%" y="-18%" width="136%" height="142%">
-      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#0B344C" flood-opacity="0.24"/>
+    <linearGradient id="ribbon" x1="356" y1="182" x2="282" y2="319" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E0EFF8"/>
+      <stop offset=".65" stop-color="#D1E7F4"/>
+      <stop offset=".86" stop-color="#BED9EA"/>
+      <stop offset="1" stop-color="#F5FBFE"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-15%" width="140%" height="145%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#354D5E" flood-opacity=".23"/>
     </filter>
-    <filter id="inkShadow" x="-15%" y="-15%" width="130%" height="140%">
-      <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#155B80" flood-opacity="0.16"/>
+    <filter id="curlShadow" x="-40%" y="-30%" width="180%" height="180%">
+      <feDropShadow dx="-3" dy="5" stdDeviation="5" flood-color="#2A668B" flood-opacity=".32"/>
+    </filter>
+    <filter id="markShadow" x="-20%" y="-15%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#2B7099" flood-opacity=".23"/>
     </filter>
   </defs>
 
-  <!-- Layered sheet edges -->
-  <g filter="url(#iconShadow)">
-    <rect x="154" y="886" width="716" height="62" rx="31" fill="#277AAE"/>
-    <rect x="138" y="868" width="748" height="70" rx="35" fill="#3D9ACF"/>
-    <rect x="120" y="76" width="784" height="800" rx="146" fill="url(#paper)"/>
+  <!-- The lower sheets follow the rounded silhouette of the front sheet. -->
+  <g filter="url(#shadow)">
+    <path d="M158 30H407C470 30 521 74 521 137V387C521 452 481 500 415 500H155C89 500 47 456 47 390V144C47 78 91 30 158 30Z" fill="url(#edge)"/>
+    <path d="M49 381C49 448 89 493 155 493H415C479 493 518 449 520 386" stroke="#75BDE8" stroke-width="2"/>
+    <path d="M49 374C49 441 89 486 155 486H415C479 486 519 442 521 379" stroke="#328FC6" stroke-opacity=".65" stroke-width="2"/>
+    <path d="M158 12H411C466 12 521 66 521 119V374C521 439 482 480 415 480H155C89 480 47 439 47 373V129C47 62 91 12 158 12Z" fill="url(#paper)"/>
+    <path d="M411 14H158C92 14 49 63 49 129V373C49 437 89 478 155 478H415C480 478 519 438 519 374V119" stroke="#7BC3EB" stroke-opacity=".65" stroke-width="2"/>
 
-    <!-- Ruled paper lines -->
-    <g stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.28">
-      <path d="M182 238h660"/>
-      <path d="M182 316h660"/>
-      <path d="M182 394h660"/>
-      <path d="M182 472h660"/>
-      <path d="M182 550h660"/>
-      <path d="M182 628h660"/>
-      <path d="M182 706h660"/>
-      <path d="M182 796h660"/>
+    <!-- Ruled lines, including the gap around the uppercase O. -->
+    <g stroke="#B6E0F3" stroke-opacity=".6" stroke-width="2.5" stroke-linecap="round">
+      <path d="M99 99H465M99 139H250M319 139H469M99 178H250M319 178H469M99 218H469M99 258H469M99 298H469M99 338H469M99 378H469M99 417H413"/>
     </g>
 
-    <!-- Folded top-right corner -->
-    <path d="M678 76h96c83 0 130 47 130 130v96c-86 0-198-96-226-226z" fill="url(#fold)"/>
-    <path d="M678 76c28 130 140 226 226 226" fill="none" stroke="#D6E8F3" stroke-width="4"/>
-    <path d="M692 92c27 113 116 197 210 208" fill="none" stroke="#FFFFFF" stroke-width="7" opacity="0.9"/>
-    <path d="M702 105c25 94 101 167 187 184" fill="none" stroke="#E2EFF7" stroke-width="3"/>
-    <path d="M688 76c33 127 137 220 220 226" fill="none" stroke="url(#foldShade)" stroke-width="7"/>
+    <!-- The rounded outer corner and thin layered curl remain separate. -->
+    <path d="M411 12C467 12 512 53 521 119C503 82 463 43 411 12Z" fill="url(#curlBack)"/>
+    <g stroke="#FFFFFF" stroke-opacity=".65" stroke-width="1.5">
+      <path d="M422 15C465 29 500 62 516 100"/>
+      <path d="M431 17C472 32 502 63 517 99"/>
+      <path d="M443 21C478 37 502 62 515 90"/>
+      <path d="M453 25C481 40 502 63 512 84"/>
+    </g>
+    <path d="M411 12C419 17 418 30 418 45V75C418 97 430 107 451 107H493C507 107 515 109 521 119C504 89 478 63 450 38C435 24 422 15 411 12Z" fill="url(#curl)" filter="url(#curlShadow)"/>
 
-    <!-- White V mark -->
-    <g filter="url(#inkShadow)">
-      <ellipse cx="548" cy="332" rx="32" ry="58" fill="none" stroke="#FFFFFF" stroke-width="31"/>
-      <path d="M356 424 548 736 740 424" fill="none" stroke="#FFFFFF" stroke-width="76" stroke-linecap="square" stroke-linejoin="miter"/>
-      <path d="M548 736 740 424" fill="none" stroke="url(#vShade)" stroke-width="12" opacity="0.65"/>
+    <!-- White outlined envelope: upright sides with an asymmetric folded V. -->
+    <g filter="url(#markShadow)">
+      <path d="M187 178H200V367H368V178H381V379H187Z" fill="#FAFDFE"/>
+      <path d="M381 178H359C348 178 342 184 337 194L278 304C274 313 276 319 284 323H296C304 323 308 314 312 307Z" fill="url(#ribbon)"/>
+      <path d="M187 178H208C218 178 224 184 229 194L291 304C294 310 298 317 302 320C298 323 292 323 287 323H276C268 323 264 319 260 312Z" fill="#FFFFFF"/>
+      <ellipse cx="284" cy="170.5" rx="27" ry="32.5" fill="none" stroke="#FFFFFF" stroke-width="16"/>
     </g>
 
-    <!-- Paperclip -->
-    <g transform="translate(744 684) rotate(-34) scale(3.05)" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" opacity="0.96">
-      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-    </g>
+    <!-- Small diagonal double-loop paperclip. -->
+    <path d="M438 408L421 425C407 439 421 457 435 443L462 416C475 403 459 389 448 401L430 419C423 426 430 433 437 426L451 412" stroke="#377DA2" stroke-opacity=".22" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 1)"/>
+    <path d="M438 408L421 425C407 439 421 457 435 443L462 416C475 403 459 389 448 401L430 419C423 426 430 433 437 426L451 412" stroke="#EBF7FC" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 </svg>

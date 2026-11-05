@@ -1,0 +1,17 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=VofdReader
+GenericName=OFD Reader
+GenericName[zh_CN]=OFD 阅读器
+Comment=Read OFD documents
+Comment[zh_CN]=查看 OFD 版式文档
+Exec=ofd-app %f
+TryExec=ofd-app
+Icon=vofdreader
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/ofd;application/vnd.ofd;
+Keywords=OFD;Document;Reader;
+Keywords[zh_CN]=OFD;文档;阅读器;版式;
+StartupNotify=true

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 16.933 16.933">
+  <title>OFD document</title>
+  <defs>
+    <filter id="a" width="1.078" height="1.067" x="-.039" y="-.033" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation=".206"/>
+    </filter>
+  </defs>
+  <g fill-rule="evenodd">
+    <path d="M3.44 1.354a1.32 1.32 0 0 0-1.323 1.323v12.171c0 .733.59 1.323 1.323 1.323h10.053a1.32 1.32 0 0 0 1.323-1.323V4.53l-3.175-3.175z" filter="url(#a)" opacity=".15" style="paint-order:stroke fill markers"/>
+    <path fill="#55ade4" d="M3.44 1.058a1.32 1.32 0 0 0-1.323 1.323v12.171c0 .733.59 1.323 1.323 1.323h10.053a1.32 1.32 0 0 0 1.323-1.323V4.233l-3.174-3.175z" style="paint-order:stroke fill markers"/>
+    <path fill="#fff" d="m14.816 4.233-3.175-3.175V2.91c0 .733.59 1.323 1.323 1.323z" opacity=".35" style="paint-order:stroke fill markers"/>
+  </g>
+  <!-- Simplified application emblem for legibility at MIME icon sizes. -->
+  <g transform="translate(.5145 1.35) scale(.028)" fill="#fff">
+    <path d="M187 178H200V367H368V178H381V379H187Z"/>
+    <path d="M381 178H359C348 178 342 184 337 194L278 304C274 313 276 319 284 323H296C304 323 308 314 312 307Z" opacity=".8"/>
+    <path d="M187 178H208C218 178 224 184 229 194L291 304C294 310 298 317 302 320C298 323 292 323 287 323H276C268 323 264 319 260 312Z"/>
+    <!-- Uppercase O: a broad oval rather than a narrow, straight-sided zero. -->
+    <ellipse cx="284" cy="170.5" rx="27" ry="32.5" fill="none" stroke="#fff" stroke-width="16"/>
+  </g>
+  <path fill-rule="evenodd" d="M11.641 2.91v.155c0 .794.59 1.433 1.323 1.433h1.852v-.265h-1.852A1.32 1.32 0 0 1 11.64 2.91z" opacity=".1" style="paint-order:stroke fill markers"/>
+</svg>

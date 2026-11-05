@@ -1,0 +1,9 @@
+# Association example: merge these entries into your existing mimeapps.list.
+# Do not overwrite your existing file with this example.
+[Default Applications]
+application/ofd=vofdreader.desktop;
+application/vnd.ofd=vofdreader.desktop;
+
+[Added Associations]
+application/ofd=vofdreader.desktop;
+application/vnd.ofd=vofdreader.desktop;

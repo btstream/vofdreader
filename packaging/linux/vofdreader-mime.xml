@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/ofd">
+    <comment>OFD document</comment>
+    <comment xml:lang="zh_CN">OFD 版式文档</comment>
+    <sub-class-of type="application/zip"/>
+    <alias type="application/vnd.ofd"/>
+    <glob pattern="*.ofd" weight="60"/>
+    <icon name="application-ofd"/>
+  </mime-type>
+</mime-info>

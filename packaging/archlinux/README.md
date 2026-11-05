@@ -1,0 +1,36 @@
+# Arch Linux 打包
+
+`PKGBUILD` 构建 `vofdreader-git`，从 GitHub `main` 获取最新源码，版本号自动生成为 `0.1.0.r<提交数>.g<短哈希>`。目前声明支持 `x86_64`，其他架构未经打包验证。
+
+## 构建与安装
+
+先确保本仓库新增的 `packaging/linux/` 文件和两个 SVG 图标已提交并推送到远端；PKGBUILD 默认读取远端源码，**不读取工作目录中尚未推送的修改**。
+
+```sh
+sudo pacman -S --needed base-devel git
+cd packaging/archlinux
+makepkg -si
+```
+
+以普通用户运行 `makepkg`，不要使用 `sudo makepkg`。首次构建需要网络下载 Rust 依赖，可能耗费较多时间和磁盘空间。默认执行工作区测试，可用 `makepkg --nocheck -si` 跳过。
+
+若需验证尚未推送的本地源码，可在 **PKGBUILD 的副本** 中将 `source` 改为本地 Git 仓库的 `git+file:///绝对路径`；本地修改也必须先提交才能被 Git 源码机制获取。
+
+## 安装内容
+
+- `/usr/bin/ofd-app`：桌面阅读器。
+- `/usr/bin/ofd-cli`：命令行工具。
+- 应用菜单入口、OFD MIME 定义、应用和文件类型图标。
+
+保留 Wayland 和 X11 支持；需要可用的 Vulkan 实现，安装与显卡匹配的驱动。中文字体建议安装 `noto-fonts-cjk`，也可使用已有的中文字体。
+
+桌面、MIME 和图标缓存由 Arch 的系统 pacman hooks 更新，无需额外 `.install` 脚本。包不安装 `mimeapps.list`，不覆盖用户的默认关联。如需设为默认阅读器：
+
+```sh
+xdg-mime default vofdreader.desktop application/ofd
+xdg-mime default vofdreader.desktop application/vnd.ofd
+```
+
+以上可选命令需要 `xdg-utils`。
+
+此 PKGBUILD 尚未完成 Arch 干净 chroot 构建验证；发布到 AUR 前建议使用 `devtools` 进行验证，并用 `makepkg --printsrcinfo > .SRCINFO` 生成元数据。
