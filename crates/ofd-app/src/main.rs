@@ -1046,7 +1046,11 @@ impl ReaderApp {
                     if this.doc_generation == generation && page < this.thumbs.len() {
                         this.gpu.borrow_mut().register(image.clone());
                         this.thumbs[page] = Some(image);
-                        cx.notify();
+                        let visible = this.thumbnail_on_screen(page);
+                        this.gpu.borrow_mut().background_done(visible);
+                        if visible {
+                            cx.notify();
+                        }
                     }
                     this.doc_generation == generation
                 });
@@ -1238,10 +1242,45 @@ impl ReaderApp {
                 {
                     this.request_page_render(cx);
                 }
-                cx.notify();
+                let visible = this.page_on_screen(page);
+                this.finish_background(visible, cx);
             });
         })
         .detach();
+    }
+
+    /// Thumbnails show in the sidebar and page grid, and stand in for an
+    /// on-screen page that has no bitmap yet.
+    fn thumbnail_on_screen(&self, page: usize) -> bool {
+        self.sidebar_open
+            || self.grid_open
+            || (self.page_on_screen(page)
+                && !self.page_cache.keys().any(|(cached, _)| *cached == page)
+                && (self.view_mode == ViewMode::Continuous || self.page_image.is_none()))
+    }
+
+    /// Whether a bitmap of `page` is (or is about to be) drawn: the
+    /// continuous rows actually built, or the single page being shown.
+    fn page_on_screen(&self, page: usize) -> bool {
+        match self.view_mode {
+            ViewMode::Continuous => self.continuous_visible_range(self.viewport).contains(&page),
+            ViewMode::Single => page == self.page,
+        }
+    }
+
+    /// A background raster job finished. Every notify repaints the whole
+    /// window, so only results that are on screen request one; otherwise the
+    /// next job is scheduled directly instead of through a frame.
+    fn finish_background(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.gpu.borrow_mut().background_done(visible);
+        if visible {
+            cx.notify();
+            return;
+        }
+        if self.view_mode == ViewMode::Continuous {
+            self.ensure_continuous_pages(self.viewport, cx);
+        }
+        self.schedule_nearby(cx);
     }
 
     fn ensure_continuous_pages(&mut self, viewport: Size<Pixels>, cx: &mut Context<Self>) {
@@ -3416,7 +3455,9 @@ impl ReaderApp {
                 {
                     this.request_page_render(cx);
                 }
-                cx.notify();
+                // Prefetched tiles stay in the cache until they scroll in.
+                let visible = this.tile_wanted.values().any(|keys| keys.contains(&key));
+                this.finish_background(visible, cx);
             });
         })
         .detach();
@@ -4205,8 +4246,14 @@ impl Render for ReaderApp {
         if self.search_open {
             canvas = canvas.child(self.search_panel(cx));
         }
+        // Only on-screen pages: background prefetch neither shows the badge
+        // nor needs a repaint to hide it again.
         if self.loading
-            || (self.view_mode == ViewMode::Continuous && !self.continuous_pending.is_empty())
+            || (self.view_mode == ViewMode::Continuous
+                && self
+                    .continuous_pending
+                    .iter()
+                    .any(|(page, _)| self.page_on_screen(*page)))
         {
             canvas = canvas.child(
                 div()

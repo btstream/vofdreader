@@ -40,6 +40,10 @@ pub struct Stats {
     pub peak_resident_bytes: usize,
     pub dot_quads: u64,
     pub dot_layouts: u64,
+    /// Finished background raster jobs (pages, tiles, thumbnails) and how
+    /// many of them requested a full-window redraw.
+    pub background_jobs: u64,
+    pub background_redraws: u64,
 }
 
 pub struct Resources {
@@ -126,6 +130,11 @@ impl Resources {
         self.log("release", 0, true);
     }
 
+    pub fn background_done(&mut self, redraw: bool) {
+        self.stats.background_jobs += 1;
+        self.stats.background_redraws += u64::from(redraw);
+    }
+
     pub fn frame(&mut self, cache_bytes: usize) {
         self.last_cache_bytes = cache_bytes;
         self.stats.frames += 1;
@@ -140,7 +149,7 @@ impl Resources {
         self.last_log = Instant::now();
         let s = &self.stats;
         eprintln!(
-            "[gpu] {event} frames={} page_draws={} images_created={} first_uses={} first_use_mib={:.2} releases={} page_resident_mib={:.2} peak_page_resident_mib={:.2} cpu_cache_mib={:.2} dot_quads={} dot_layouts={}",
+            "[gpu] {event} frames={} page_draws={} images_created={} first_uses={} first_use_mib={:.2} releases={} page_resident_mib={:.2} peak_page_resident_mib={:.2} cpu_cache_mib={:.2} dot_quads={} dot_layouts={} background_jobs={} background_redraws={}",
             s.frames,
             s.page_draws,
             s.images_created,
@@ -151,7 +160,9 @@ impl Resources {
             s.peak_resident_bytes as f64 / 1048576.0,
             cache_bytes as f64 / 1048576.0,
             s.dot_quads,
-            s.dot_layouts
+            s.dot_layouts,
+            s.background_jobs,
+            s.background_redraws
         );
     }
 

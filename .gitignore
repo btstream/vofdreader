@@ -17,3 +17,4 @@
 
 # 允许提交脱敏后的公开测试样本，例如：
 # !fixtures/public/*.ofd
+/scripts/__pycache__
