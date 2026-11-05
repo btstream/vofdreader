@@ -15,8 +15,8 @@ use resvg::tiny_skia as sk;
 use resvg::usvg::{self, fontdb};
 
 use super::{
-    ClipShape, Item, Matrix, PageRenderer, PathCmd, PathStyle, Shading, ShadingKind, ShadingSpread,
-    TextStyle, blend_mode, cap, glyph_orientation, join, text_glyph_items,
+    ClipShape, ImageFilter, Item, Matrix, PageRenderer, PathCmd, PathStyle, Shading, ShadingKind,
+    ShadingSpread, TextStyle, blend_mode, cap, glyph_orientation, join, text_glyph_items,
 };
 use crate::model::SizeMm;
 
@@ -181,7 +181,7 @@ impl Prepared {
     }
 
     /// Paint into `pixmap`; `base` maps page millimetres to its pixels.
-    pub fn render(&self, base: sk::Transform, pixmap: &mut sk::PixmapMut) {
+    pub fn render(&self, base: sk::Transform, pixmap: &mut sk::PixmapMut, filter: ImageFilter) {
         // Visible page rectangle plus an anti-aliasing margin of 2 pixels.
         let Some(inverse) = base.invert() else {
             return;
@@ -196,11 +196,22 @@ impl Prepared {
         let Some(view) = Bounds::of_rect(device, inverse) else {
             return;
         };
-        draw(&self.ops, base, &view, pixmap);
+        let filter = match filter {
+            ImageFilter::Nearest => sk::FilterQuality::Nearest,
+            ImageFilter::Bilinear => sk::FilterQuality::Bilinear,
+            ImageFilter::Bicubic => sk::FilterQuality::Bicubic,
+        };
+        draw(&self.ops, base, &view, pixmap, filter);
     }
 }
 
-fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapMut) {
+fn draw(
+    ops: &[Op],
+    base: sk::Transform,
+    view: &Bounds,
+    pixmap: &mut sk::PixmapMut,
+    filter: sk::FilterQuality,
+) {
     for op in ops {
         if !op.bounds().intersects(view) {
             continue;
@@ -245,7 +256,7 @@ fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapM
                     shader: sk::Pattern::new(
                         image.as_ref().as_ref(),
                         sk::SpreadMode::Pad,
-                        sk::FilterQuality::Bicubic,
+                        filter,
                         1.0,
                         sk::Transform::identity(),
                     ),
@@ -303,12 +314,12 @@ fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapM
                 ops,
                 opacity,
                 bounds,
-            } => draw_layer(ops, bounds, base, pixmap, *opacity, &[]),
+            } => draw_layer(ops, bounds, base, pixmap, *opacity, &[], filter),
             Op::Clip {
                 ops,
                 regions,
                 bounds,
-            } => draw_layer(ops, bounds, base, pixmap, 1.0, regions),
+            } => draw_layer(ops, bounds, base, pixmap, 1.0, regions, filter),
         }
     }
 }
@@ -337,6 +348,7 @@ fn draw_layer(
     pixmap: &mut sk::PixmapMut,
     opacity: f32,
     regions: &[Vec<ClipOutline>],
+    filter: sk::FilterQuality,
 ) {
     let Some((x0, y0, width, height)) = device_rect(bounds, base, pixmap) else {
         return;
@@ -351,7 +363,7 @@ fn draw_layer(
     let local = sk::Rect::from_xywh(-2.0, -2.0, width as f32 + 4.0, height as f32 + 4.0)
         .and_then(|r| Bounds::of_rect(r, inverse));
     let Some(local) = local else { return };
-    draw(ops, shifted, &local, &mut layer.as_mut());
+    draw(ops, shifted, &local, &mut layer.as_mut(), filter);
     if let Some(mask) = clip_mask(regions, shifted, width, height) {
         layer.apply_mask(&mask);
     }

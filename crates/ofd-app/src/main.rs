@@ -555,10 +555,12 @@ impl ReaderApp {
                 let generation = self.doc_generation;
                 let renderer_doc = doc.clone();
                 let parsed_page_limit = self.cache_config.parsed_page_limit();
+                let image_filter = self.settings.performance.image_sampling.filter();
                 cx.spawn(async move |this, cx| {
                     let renderer = cx
                         .background_spawn(async move {
                             PageRenderer::with_tree_cache_limit(&renderer_doc, parsed_page_limit)
+                                .with_image_filter(image_filter)
                         })
                         .await;
                     let _ = this.update(cx, |this, cx| {
@@ -1604,11 +1606,39 @@ impl ReaderApp {
 
     fn rotate_view(&mut self, cx: &mut Context<Self>) {
         self.rotation = (self.rotation + 1) % 4;
-        // Cached rasters and in-flight jobs belong to the previous orientation.
+        self.clear_selection();
+        self.refresh_search_highlights();
+        // Cached rasters and in-flight jobs belong to the previous orientation;
+        // the old bitmap has the wrong shape, so nothing stays on screen.
+        self.page_image = None;
+        if self.doc.is_some() && self.view_mode == ViewMode::Continuous {
+            self.scroll_to_continuous_page(self.viewport, self.page);
+        }
+        self.invalidate_rasters(cx);
+    }
+
+    /// Applies the image sampling setting; bitmaps drawn with the old filter
+    /// are dropped and re-rendered. A no-op when it did not change.
+    fn apply_image_sampling(&mut self, cx: &mut Context<Self>) {
+        let filter = self.settings.performance.image_sampling.filter();
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        if renderer.image_filter() == filter {
+            return;
+        }
+        renderer.set_image_filter(filter);
+        self.invalidate_rasters(cx);
+    }
+
+    /// Drops every cached page bitmap and tile, discards in-flight results
+    /// and re-requests what is on screen. A single page's current bitmap
+    /// stays visible until its replacement arrives (`image_dpi = 0` forces
+    /// the re-render).
+    fn invalidate_rasters(&mut self, cx: &mut Context<Self>) {
         self.view_generation = self.view_generation.wrapping_add(1);
         self.render_seq = self.render_seq.wrapping_add(1);
         self.latest_render = None;
-        self.page_image = None;
         self.image_dpi = 0;
         self.page_cache.clear();
         self.page_cache_order.clear();
@@ -1616,12 +1646,10 @@ impl ReaderApp {
         self.clear_tiles();
         self.continuous_pending.clear();
         self.continuous_failed.clear();
-        self.clear_selection();
-        self.refresh_search_highlights();
-        self.loading = self.view_mode == ViewMode::Single && self.doc.is_some();
+        self.loading =
+            self.view_mode == ViewMode::Single && self.doc.is_some() && self.page_image.is_none();
         if self.doc.is_some() {
             if self.view_mode == ViewMode::Continuous {
-                self.scroll_to_continuous_page(self.viewport, self.page);
                 self.ensure_continuous_pages(self.viewport, cx);
             } else if !self.grid_open {
                 self.request_page_render(cx);

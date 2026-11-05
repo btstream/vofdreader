@@ -14,6 +14,6 @@ pub use document::OfdDocument;
 pub use error::{OfdError, Result};
 pub use model::*;
 pub use render::{
-    FontRenderReport, PageRenderer, PageTextChar, PageTextLayout, RasterBackend, RasterPage,
-    RasterRegion, TextMatchRect, preload_system_fonts,
+    FontRenderReport, ImageFilter, PageRenderer, PageTextChar, PageTextLayout, RasterBackend,
+    RasterPage, RasterRegion, TextMatchRect, preload_system_fonts,
 };

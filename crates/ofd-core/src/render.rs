@@ -763,6 +763,36 @@ struct GlyphFont {
     face_index: u32,
 }
 
+/// Sampling used when page images are scaled (direct backend). Bicubic is
+/// the smoothest and slowest: on pages with large upscaled images it costs
+/// 2–3× the whole render compared with bilinear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageFilter {
+    /// Nearest neighbour: the image's own pixels, no smoothing.
+    Nearest,
+    Bilinear,
+    #[default]
+    Bicubic,
+}
+
+impl ImageFilter {
+    fn to_u8(self) -> u8 {
+        match self {
+            Self::Nearest => 0,
+            Self::Bilinear => 1,
+            Self::Bicubic => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Nearest,
+            1 => Self::Bilinear,
+            _ => Self::Bicubic,
+        }
+    }
+}
+
 /// How pages become pixels. Both share DisplayList parsing and fonts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RasterBackend {
@@ -813,6 +843,9 @@ pub struct PageRenderer {
     building: Mutex<HashMap<usize, Arc<Mutex<()>>>>,
     font_cache: Mutex<raster::FontCache>,
     image_cache: Mutex<raster::ImageCache>,
+    /// `ImageFilter` as u8: applied at raster time, so changing it needs no
+    /// re-parse of cached pages (callers drop their old bitmaps).
+    image_filter: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -932,6 +965,7 @@ impl PageRenderer {
             building: Mutex::new(HashMap::new()),
             font_cache: Mutex::new(raster::FontCache::default()),
             image_cache: Mutex::new(raster::ImageCache::default()),
+            image_filter: std::sync::atomic::AtomicU8::new(ImageFilter::default().to_u8()),
         }
     }
 
@@ -947,6 +981,22 @@ impl PageRenderer {
 
     pub fn backend(&self) -> RasterBackend {
         self.backend
+    }
+
+    /// Image sampling for the direct backend; takes effect on the next
+    /// rasterization. The SVG backend keeps resvg's own (bicubic) choice.
+    pub fn set_image_filter(&self, filter: ImageFilter) {
+        self.image_filter
+            .store(filter.to_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn with_image_filter(self, filter: ImageFilter) -> Self {
+        self.set_image_filter(filter);
+        self
+    }
+
+    pub fn image_filter(&self) -> ImageFilter {
+        ImageFilter::from_u8(self.image_filter.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn export_svg(&self, doc: &OfdDocument, index: usize) -> Result<String> {
@@ -1167,6 +1217,7 @@ impl PageRenderer {
                 prepared.render(
                     resvg::tiny_skia::Transform::from_scale(mm, mm),
                     &mut pixmap.as_mut(),
+                    self.image_filter(),
                 );
             }
         }
@@ -1238,6 +1289,7 @@ impl PageRenderer {
                 prepared.render(
                     resvg::tiny_skia::Transform::from_row(mm, 0.0, 0.0, mm, dx, dy),
                     &mut pixmap.as_mut(),
+                    self.image_filter(),
                 );
             }
         }

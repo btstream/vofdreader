@@ -103,6 +103,8 @@ pub struct PerformanceSettings {
     pub max_tile_dpi: u32,
     /// Parallel render jobs; 0 means automatic (see `tiles::concurrency`).
     pub render_threads: usize,
+    /// How page images are resampled when scaled.
+    pub image_sampling: ImageSampling,
 }
 
 impl Default for PerformanceSettings {
@@ -117,6 +119,7 @@ impl Default for PerformanceSettings {
             max_page_dpi: 384,
             max_tile_dpi: 768,
             render_threads: 0,
+            image_sampling: ImageSampling::default(),
         }
     }
 }
@@ -209,6 +212,27 @@ pub enum QualityChoice {
     Custom,
 }
 
+/// Resampling of page images. Bicubic is the smoothest; bilinear is 2–3×
+/// faster on pages with large scaled images; nearest shows source pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSampling {
+    Nearest,
+    Bilinear,
+    #[default]
+    Bicubic,
+}
+
+impl ImageSampling {
+    pub fn filter(self) -> ofd_core::ImageFilter {
+        match self {
+            Self::Nearest => ofd_core::ImageFilter::Nearest,
+            Self::Bilinear => ofd_core::ImageFilter::Bilinear,
+            Self::Bicubic => ofd_core::ImageFilter::Bicubic,
+        }
+    }
+}
+
 /// A user action from the settings window. Kept copyable so click handlers do
 /// not need to clone model data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +248,7 @@ pub enum SettingsAction {
     TogglePageShadows,
     ToggleSearchAutoScroll,
     SetQuality(QualityChoice),
+    SetImageSampling(ImageSampling),
     AdjustPageLimit(i32),
     AdjustParsedLimit(i32),
     AdjustPrefetchPages(i32),
@@ -396,6 +421,30 @@ mod tests {
         // Values outside the slider still map to its ends, never past them.
         assert_eq!(cache_fraction(1), 0.0);
         assert_eq!(cache_fraction(9999), 1.0);
+    }
+
+    #[test]
+    fn image_sampling_defaults_to_bicubic_and_round_trips() {
+        // Settings files written before the option existed.
+        let old: PerformanceSettings = serde_json::from_str(r#"{"cache_mib": 512}"#).unwrap();
+        assert_eq!(old.image_sampling, ImageSampling::Bicubic);
+        for sampling in [
+            ImageSampling::Nearest,
+            ImageSampling::Bilinear,
+            ImageSampling::Bicubic,
+        ] {
+            let performance = PerformanceSettings {
+                image_sampling: sampling,
+                ..PerformanceSettings::default()
+            };
+            let json = serde_json::to_string(&performance).unwrap();
+            let back: PerformanceSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.image_sampling, sampling);
+        }
+        assert_eq!(
+            ImageSampling::Bilinear.filter(),
+            ofd_core::ImageFilter::Bilinear
+        );
     }
 
     #[test]

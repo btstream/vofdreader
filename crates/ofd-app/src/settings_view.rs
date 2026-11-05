@@ -1,6 +1,8 @@
 //! Settings modal and the bridge from a control to live reader state.
 use super::*;
-use crate::settings::{GapChoice, QualityChoice, SettingsAction, ThemeChoice, ViewChoice};
+use crate::settings::{
+    GapChoice, ImageSampling, QualityChoice, SettingsAction, ThemeChoice, ViewChoice,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SettingsTab {
@@ -883,6 +885,33 @@ impl ReaderApp {
                     cx,
                 ),
             ))
+            .child(self.setting_row(
+                "图片采样",
+                "页面中的图片缩放时的插值方式；双线性在大图页面上比双三次快 2–3 倍",
+                self.segmented(
+                    "performance-image-sampling",
+                    match performance.image_sampling {
+                        ImageSampling::Nearest => 0,
+                        ImageSampling::Bilinear => 1,
+                        ImageSampling::Bicubic => 2,
+                    },
+                    vec![
+                        (
+                            "原始像素",
+                            SettingsAction::SetImageSampling(ImageSampling::Nearest),
+                        ),
+                        (
+                            "双线性",
+                            SettingsAction::SetImageSampling(ImageSampling::Bilinear),
+                        ),
+                        (
+                            "双三次",
+                            SettingsAction::SetImageSampling(ImageSampling::Bicubic),
+                        ),
+                    ],
+                    cx,
+                ),
+            ))
             .child(
                 self.settings_card()
                     .mt(px(4.0))
@@ -1277,6 +1306,9 @@ impl ReaderApp {
                 self.settings.reading.search_auto_scroll =
                     !self.settings.reading.search_auto_scroll;
             }
+            SettingsAction::SetImageSampling(sampling) => {
+                self.settings.performance.image_sampling = sampling;
+            }
             SettingsAction::SetQuality(quality) => {
                 self.settings.performance.quality = quality;
             }
@@ -1358,6 +1390,7 @@ impl ReaderApp {
         self.settings.normalize();
         // Takes effect for the next scheduled jobs; running jobs finish.
         self.tile_slots = crate::tiles::concurrency(self.settings.performance.render_threads);
+        self.apply_image_sampling(cx);
         self.settings.save();
         cx.notify();
     }
