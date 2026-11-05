@@ -14,7 +14,7 @@ makepkg -si
 
 以普通用户运行 `makepkg`，不要使用 `sudo makepkg`。首次构建需要网络下载 Rust 依赖，可能耗费较多时间和磁盘空间。默认执行工作区测试，可用 `makepkg --nocheck -si` 跳过。
 
-PKGBUILD 设置 `options=('!lto')`。Arch 默认的 `lto` 选项会给 `CFLAGS` 追加 `-flto=auto`，把 `wayland-backend` 的 C shim 编译成 GCC LTO 对象；Rust 最终通过 clang/mold 链接时没有加载该 LTO 插件，会报 `wl_log_trampoline_to_rust_client` 未定义。项目自身的 `[profile.release]` 已启用 thin LTO，因此这里只关闭 makepkg 注入到 C 编译的 LTO。
+PKGBUILD 设置 `options=('!lto')`。Arch 默认的 `lto` 选项会给 `CFLAGS` 追加 `-flto=auto`，把 `wayland-backend` 的 C shim 编译成 GCC LTO 对象；rustc 在 x86_64 Linux 上默认使用 rust-lld 链接（Rust 1.90 起），而 lld 无法读取 GCC LTO 字节码，因此会报 `wl_log_trampoline_to_rust_client` 未定义。（GNU ld、mold 可以通过 GCC 插件读取这类对象，但不能依赖构建环境恰好用了它们。）项目自身的 `[profile.release]` 已启用 thin LTO，因此这里只关闭 makepkg 注入到 C 编译的 LTO。
 
 若需验证尚未推送的本地源码，可在 **PKGBUILD 的副本** 中将 `source` 改为本地 Git 仓库的 `git+file:///绝对路径`；本地修改也必须先提交才能被 Git 源码机制获取。
 

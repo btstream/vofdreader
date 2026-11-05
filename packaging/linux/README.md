@@ -20,8 +20,7 @@ install -Dm755 target/release/ofd-app "$HOME/.local/bin/ofd-app"
 install -Dm644 packaging/linux/vofdreader.desktop "$data_home/applications/vofdreader.desktop"
 install -Dm644 packaging/linux/vofdreader-mime.xml "$data_home/mime/packages/vofdreader.xml"
 install -Dm644 assets/vofdreader.svg "$data_home/icons/hicolor/scalable/apps/vofdreader.svg"
-install -Dm644 assets/application-ofd.svg "$data_home/icons/hicolor/scalable/mimetypes/application-ofd.svg"
-install -Dm644 assets/application-ofd.svg "$data_home/icons/hicolor/scalable/mimetypes/application-vnd.ofd.svg"
+install -Dm644 assets/application-ofd.svg "$data_home/icons/hicolor/scalable/mimetypes/vofdreader-ofd.svg"
 
 update-mime-database "$data_home/mime"
 update-desktop-database "$data_home/applications"
@@ -29,6 +28,12 @@ touch "$data_home/icons/hicolor"
 ```
 
 确保桌面会话的 `PATH` 包含 `~/.local/bin`；否则将安装后的 desktop 文件中的 `Exec` 和 `TryExec` 改为可执行文件的绝对路径（desktop 文件不展开 `~` 或 `$HOME`）。图标未立即刷新时，可注销后重新登录。
+
+### 文件类型图标名
+
+MIME 定义中的图标名是 `vofdreader-ofd`，没有使用默认推导出的 `application-ofd`。原因是 KDE 在查找 `application-*` 图标时，如果当前主题（例如 Colloid）里没有这个名字，会先使用该主题自带的 `application-x-generic`，不会再继续到 hicolor 里查找。这样一来，安装到 hicolor 的 `application-ofd.svg` 永远不会显示。改用不带 `application-` 前缀的名字（WPS 的 `wps-office-ofd` 也是这种做法）后，可以正常回退到 hicolor 并找到图标。
+
+已经打开的 Dolphin 需要重开后才会显示新图标；桌面可执行 `systemctl --user restart plasma-plasmashell`。
 
 ## 设置默认打开方式（可选）
 

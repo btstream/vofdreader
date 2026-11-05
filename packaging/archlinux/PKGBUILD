@@ -30,10 +30,12 @@ optdepends=(
 )
 provides=('vofdreader')
 conflicts=('vofdreader')
-# makepkg's lto option adds -flto=auto to CFLAGS. That turns
-# wayland-backend's C shim into GCC LTO objects, which the clang/mold link
-# driven by rustc cannot read without a plugin. Cargo already does thin LTO
-# through [profile.release], so only disable makepkg's C-side LTO injection.
+# makepkg's lto option adds -flto=auto to CFLAGS. That turns C code built by
+# cc-rs (e.g. wayland-backend's shim) into GCC LTO bytecode objects. rustc
+# links x86_64 Linux binaries with rust-lld by default (Rust >= 1.90), and lld
+# cannot read GCC LTO bytecode, so those symbols end up undefined
+# (wl_log_trampoline_to_rust_client). Cargo already does thin LTO through
+# [profile.release]; only disable makepkg's C-side LTO injection.
 options=('!lto')
 source=('vofdreader::git+https://github.com/btstream/vofdreader.git#branch=main')
 sha256sums=('SKIP')
@@ -75,9 +77,7 @@ package() {
   install -Dm644 assets/vofdreader.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/vofdreader.svg"
   install -Dm644 assets/application-ofd.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/application-ofd.svg"
-  install -Dm644 assets/application-ofd.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/application-vnd.ofd.svg"
+    "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/vofdreader-ofd.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/vofdreader/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

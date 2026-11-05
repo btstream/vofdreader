@@ -6,6 +6,7 @@
     <sub-class-of type="application/zip"/>
     <alias type="application/vnd.ofd"/>
     <glob pattern="*.ofd" weight="60"/>
-    <icon name="application-ofd"/>
+    <icon name="vofdreader-ofd"/>
+    <generic-icon name="x-office-document"/>
   </mime-type>
 </mime-info>
