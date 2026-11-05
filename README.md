@@ -127,7 +127,7 @@ cargo test
 
 ### 测试语料
 
-`resources/` 下放置了发票、公文、水印、图案、裁剪、图片覆盖、异常路径等 OFD 测试文档。可执行：
+`resources/` 下放置了发票、公文、水印、图案、裁剪、图片覆盖、异常路径等 OFD 测试文档。这些样本来自开源项目 [ofdrw](https://github.com/ofdrw/ofdrw)，按其 MIT License 使用；来源和许可说明见 [`resources/README.md`](resources/README.md)。可执行：
 
 ```bash
 ./scripts/render-corpus.sh resources /tmp/ofd-render-corpus

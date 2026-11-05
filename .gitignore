@@ -3,9 +3,9 @@
 **/*.rs.bk
 *.pdb
 
-# 真实 OFD 样本：默认不入库（含个人信息/发票信息）
+# 外部或含个人信息的 OFD 样本不入库。
+# resources/ 是来自 ofdrw 的公开测试语料，见 resources/README.md。
 /*.ofd
-/resources/
 /fixtures/private/
 *.ofd.local
 

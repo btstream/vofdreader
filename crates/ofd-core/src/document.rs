@@ -899,7 +899,6 @@ mod signature_tests {
     use crate::{PageRenderer, RasterRegion};
 
     #[test]
-    #[ignore = "requires private resources/pdf-match/1.ofd"]
     fn signed_value_ofd_seal_is_visible_and_transparent() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../resources/pdf-match/1.ofd");
