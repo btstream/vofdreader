@@ -67,6 +67,7 @@ cargo run -p ofd-app -- resources/y.ofd
 
 - `Ctrl/Cmd+F`：搜索
 - `Ctrl/Cmd+,`：设置
+- `Ctrl/Cmd+滚轮`：缩放
 - `+` / `-`：缩放
 - `0`：适应页面
 - `R`：顺时针旋转
@@ -153,7 +154,9 @@ crates/
 - 签名印章外观已渲染，但不执行 SM2/SM3 验签，状态栏显示“含签名（未验证）”。
 - 文本选择目前仅限当前页，按阅读顺序选择，不支持双击选词和跨页选择。
 - 图案填充按路径包围盒平铺，尚未按任意路径轮廓裁剪。
-- 暂未处理任意路径 `Clips`；`CharDirection` / `ReadDirection` 支持四个正交方向。
+- 图元 `Clips` 支持路径裁剪区（含 `TransFlag`），文字裁剪区暂未支持；`AxialShd` / `RadialShd` 渐变已支持，`RadialShd` 的 `Eccentricity` / `Angle` 椭圆参数按圆形处理。
+- `CharDirection` / `ReadDirection` 支持四个正交方向。
+- 签章图片以正片叠底（multiply）方式叠加，不透明白底的印章不会遮挡下方文字。
 - 缩略图会为前 80 页排队生成。
 - 导出仅限当前页。
 

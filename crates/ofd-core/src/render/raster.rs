@@ -15,8 +15,8 @@ use resvg::tiny_skia as sk;
 use resvg::usvg::{self, fontdb};
 
 use super::{
-    Item, Matrix, PageRenderer, PathCmd, PathStyle, TextStyle, blend_mode, cap, glyph_orientation,
-    join, text_glyph_items,
+    ClipShape, Item, Matrix, PageRenderer, PathCmd, PathStyle, Shading, ShadingKind, ShadingSpread,
+    TextStyle, blend_mode, cap, glyph_orientation, join, text_glyph_items,
 };
 use crate::model::SizeMm;
 
@@ -64,6 +64,24 @@ impl Bounds {
         }
     }
 
+    fn intersection(&self, other: &Self) -> Option<Self> {
+        let bounds = Self {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        };
+        (bounds.x0 <= bounds.x1 && bounds.y0 <= bounds.y1).then_some(bounds)
+    }
+
+    /// `other` lies inside `self`, allowing `slack` on every side.
+    fn contains(&self, other: &Self, slack: f32) -> bool {
+        self.x0 - slack <= other.x0
+            && self.y0 - slack <= other.y0
+            && self.x1 + slack >= other.x1
+            && self.y1 + slack >= other.y1
+    }
+
     fn intersects(&self, other: &Self) -> bool {
         self.x0 <= other.x1 && other.x0 <= self.x1 && self.y0 <= other.y1 && other.y0 <= self.y1
     }
@@ -82,14 +100,15 @@ enum Op {
     Fill {
         path: Arc<sk::Path>,
         ts: sk::Transform,
-        color: sk::Color,
+        /// Solid colour or gradient in path coordinates.
+        shader: sk::Shader<'static>,
         rule: sk::FillRule,
         bounds: Bounds,
     },
     Stroke {
         path: Arc<sk::Path>,
         ts: sk::Transform,
-        color: sk::Color,
+        shader: sk::Shader<'static>,
         stroke: sk::Stroke,
         bounds: Bounds,
     },
@@ -115,6 +134,19 @@ enum Op {
         opacity: f32,
         bounds: Bounds,
     },
+    /// `ops` masked by the intersection of `regions` (each a union of
+    /// page-space outlines).
+    Clip {
+        ops: Vec<Op>,
+        regions: Vec<Vec<ClipOutline>>,
+        bounds: Bounds,
+    },
+}
+
+struct ClipOutline {
+    path: sk::Path,
+    ts: sk::Transform,
+    rule: sk::FillRule,
 }
 
 impl Op {
@@ -124,7 +156,8 @@ impl Op {
             | Op::Stroke { bounds, .. }
             | Op::Image { bounds, .. }
             | Op::Vector { bounds, .. }
-            | Op::Layer { bounds, .. } => *bounds,
+            | Op::Layer { bounds, .. }
+            | Op::Clip { bounds, .. } => *bounds,
         }
     }
 }
@@ -176,12 +209,12 @@ fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapM
             Op::Fill {
                 path,
                 ts,
-                color,
+                shader,
                 rule,
                 ..
             } => {
                 let paint = sk::Paint {
-                    shader: sk::Shader::SolidColor(*color),
+                    shader: shader.clone(),
                     anti_alias: true,
                     ..sk::Paint::default()
                 };
@@ -190,12 +223,12 @@ fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapM
             Op::Stroke {
                 path,
                 ts,
-                color,
+                shader,
                 stroke,
                 ..
             } => {
                 let paint = sk::Paint {
-                    shader: sk::Shader::SolidColor(*color),
+                    shader: shader.clone(),
                     anti_alias: true,
                     ..sk::Paint::default()
                 };
@@ -227,85 +260,138 @@ fn draw(ops: &[Op], base: sk::Transform, view: &Bounds, pixmap: &mut sk::PixmapM
                 ts,
                 clip,
                 blend,
-                ..
+                bounds,
             } => {
                 let transform = base.pre_concat(*ts);
                 if clip.is_none() && *blend == sk::BlendMode::SourceOver {
                     resvg::render(tree, transform, pixmap);
                     continue;
                 }
-                let Some(mut layer) = sk::Pixmap::new(pixmap.width(), pixmap.height()) else {
+                // Layer only as large as the seal, not the whole pixmap.
+                let Some((x0, y0, width, height)) = device_rect(bounds, base, pixmap) else {
                     continue;
                 };
-                resvg::render(tree, transform, &mut layer.as_mut());
-                let mask = clip.and_then(|clip| {
-                    let mut mask = sk::Mask::new(pixmap.width(), pixmap.height())?;
+                let Some(mut layer) = sk::Pixmap::new(width, height) else {
+                    continue;
+                };
+                let shifted = transform.post_translate(-(x0 as f32), -(y0 as f32));
+                resvg::render(tree, shifted, &mut layer.as_mut());
+                if let Some(clip) = clip
+                    && let Some(mut mask) = sk::Mask::new(width, height)
+                {
                     mask.fill_path(
-                        &sk::PathBuilder::from_rect(clip),
+                        &sk::PathBuilder::from_rect(*clip),
                         sk::FillRule::Winding,
                         true,
-                        transform,
+                        shifted,
                     );
-                    Some(mask)
-                });
+                    layer.apply_mask(&mask);
+                }
                 pixmap.draw_pixmap(
-                    0,
-                    0,
+                    x0,
+                    y0,
                     layer.as_ref(),
                     &sk::PixmapPaint {
                         blend_mode: *blend,
                         ..sk::PixmapPaint::default()
                     },
                     sk::Transform::identity(),
-                    mask.as_ref(),
+                    None,
                 );
             }
             Op::Layer {
                 ops,
                 opacity,
                 bounds,
-            } => {
-                let Some(rect) = bounds.rect() else { continue };
-                let Some(device) = Bounds::of_rect(rect, base) else {
-                    continue;
-                };
-                let x0 = (device.x0.floor() as i64 - 2).max(0);
-                let y0 = (device.y0.floor() as i64 - 2).max(0);
-                let x1 = (device.x1.ceil() as i64 + 2).min(i64::from(pixmap.width()));
-                let y1 = (device.y1.ceil() as i64 + 2).min(i64::from(pixmap.height()));
-                if x1 <= x0 || y1 <= y0 {
-                    continue;
-                }
-                let Some(mut layer) = sk::Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32) else {
-                    continue;
-                };
-                let shifted = base.post_translate(-(x0 as f32), -(y0 as f32));
-                let Some(inverse) = shifted.invert() else {
-                    continue;
-                };
-                let local = sk::Rect::from_xywh(
-                    -2.0,
-                    -2.0,
-                    layer.width() as f32 + 4.0,
-                    layer.height() as f32 + 4.0,
-                )
-                .and_then(|r| Bounds::of_rect(r, inverse));
-                let Some(local) = local else { continue };
-                draw(ops, shifted, &local, &mut layer.as_mut());
-                pixmap.draw_pixmap(
-                    x0 as i32,
-                    y0 as i32,
-                    layer.as_ref(),
-                    &sk::PixmapPaint {
-                        opacity: *opacity,
-                        ..sk::PixmapPaint::default()
-                    },
-                    sk::Transform::identity(),
-                    None,
-                );
-            }
+            } => draw_layer(ops, bounds, base, pixmap, *opacity, &[]),
+            Op::Clip {
+                ops,
+                regions,
+                bounds,
+            } => draw_layer(ops, bounds, base, pixmap, 1.0, regions),
         }
     }
+}
+
+/// Pixel rectangle `(x, y, width, height)` covering page-space `bounds`
+/// plus a 2 px anti-aliasing margin, clamped to the pixmap.
+fn device_rect(
+    bounds: &Bounds,
+    base: sk::Transform,
+    pixmap: &sk::PixmapMut,
+) -> Option<(i32, i32, u32, u32)> {
+    let device = Bounds::of_rect(bounds.rect()?, base)?;
+    let x0 = (device.x0.floor() as i64 - 2).max(0);
+    let y0 = (device.y0.floor() as i64 - 2).max(0);
+    let x1 = (device.x1.ceil() as i64 + 2).min(i64::from(pixmap.width()));
+    let y1 = (device.y1.ceil() as i64 + 2).min(i64::from(pixmap.height()));
+    (x1 > x0 && y1 > y0).then(|| (x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
+/// Paints `ops` into an offscreen layer covering `bounds`, masks it by the
+/// clip regions and composites it with `opacity`.
+fn draw_layer(
+    ops: &[Op],
+    bounds: &Bounds,
+    base: sk::Transform,
+    pixmap: &mut sk::PixmapMut,
+    opacity: f32,
+    regions: &[Vec<ClipOutline>],
+) {
+    let Some((x0, y0, width, height)) = device_rect(bounds, base, pixmap) else {
+        return;
+    };
+    let Some(mut layer) = sk::Pixmap::new(width, height) else {
+        return;
+    };
+    let shifted = base.post_translate(-(x0 as f32), -(y0 as f32));
+    let Some(inverse) = shifted.invert() else {
+        return;
+    };
+    let local = sk::Rect::from_xywh(-2.0, -2.0, width as f32 + 4.0, height as f32 + 4.0)
+        .and_then(|r| Bounds::of_rect(r, inverse));
+    let Some(local) = local else { return };
+    draw(ops, shifted, &local, &mut layer.as_mut());
+    if let Some(mask) = clip_mask(regions, shifted, width, height) {
+        layer.apply_mask(&mask);
+    }
+    pixmap.draw_pixmap(
+        x0,
+        y0,
+        layer.as_ref(),
+        &sk::PixmapPaint {
+            opacity,
+            ..sk::PixmapPaint::default()
+        },
+        sk::Transform::identity(),
+        None,
+    );
+}
+
+/// Coverage of the intersection of all regions; `None` when unclipped.
+fn clip_mask(
+    regions: &[Vec<ClipOutline>],
+    ts: sk::Transform,
+    width: u32,
+    height: u32,
+) -> Option<sk::Mask> {
+    let mut combined: Option<sk::Mask> = None;
+    for region in regions {
+        let mut mask = sk::Mask::new(width, height)?;
+        for outline in region {
+            mask.fill_path(&outline.path, outline.rule, true, ts.pre_concat(outline.ts));
+        }
+        combined = Some(match combined {
+            None => mask,
+            Some(mut acc) => {
+                for (a, b) in acc.data_mut().iter_mut().zip(mask.data()) {
+                    *a = ((u16::from(*a) * u16::from(*b) + 127) / 255) as u8;
+                }
+                acc
+            }
+        });
+    }
+    combined
 }
 
 /// A system-font outline in font units, with that face's units per em.
@@ -355,8 +441,15 @@ impl ImageCache {
 }
 
 pub(crate) fn prepare(renderer: &PageRenderer, size: SizeMm, items: &[Item]) -> Prepared {
+    let page = Bounds {
+        x0: 0.0,
+        y0: 0.0,
+        x1: size.width as f32,
+        y1: size.height as f32,
+    };
     let mut builder = Builder {
         renderer,
+        page,
         fonts: renderer
             .font_cache
             .lock()
@@ -371,7 +464,7 @@ pub(crate) fn prepare(renderer: &PageRenderer, size: SizeMm, items: &[Item]) -> 
             ops.push(Op::Fill {
                 path: Arc::new(path),
                 ts: sk::Transform::identity(),
-                color: sk::Color::WHITE,
+                shader: sk::Shader::SolidColor(sk::Color::WHITE),
                 rule: sk::FillRule::Winding,
                 bounds,
             });
@@ -385,6 +478,8 @@ pub(crate) fn prepare(renderer: &PageRenderer, size: SizeMm, items: &[Item]) -> 
 
 struct Builder<'a> {
     renderer: &'a PageRenderer,
+    /// Page rectangle in millimetres; nothing outside it is ever visible.
+    page: Bounds,
     fonts: std::sync::MutexGuard<'a, FontCache>,
 }
 
@@ -454,6 +549,9 @@ impl Builder<'_> {
                 items,
                 opacity,
             } => {
+                if opacity_u8(*opacity) == 0 {
+                    return;
+                }
                 let matrix = parent.compose(*transform);
                 if *opacity < 1.0 {
                     let mut ops = Vec::new();
@@ -472,6 +570,55 @@ impl Builder<'_> {
                     for item in items {
                         self.item(item, matrix, out);
                     }
+                }
+            }
+            Item::Clip { regions, items } => {
+                let mut ops = Vec::new();
+                for item in items {
+                    self.item(item, parent, &mut ops);
+                }
+                let Some(content) = ops.iter().map(Op::bounds).reduce(Bounds::union) else {
+                    return;
+                };
+                // Only the on-page part of the content can ever be seen.
+                let Some(visible_content) = content.intersection(&self.page) else {
+                    return;
+                };
+                let mut bounds = visible_content;
+                let mut outlines = Vec::with_capacity(regions.len());
+                for region in regions {
+                    let region = clip_region(region, parent);
+                    let Some(area) = region
+                        .iter()
+                        .filter_map(|outline| Bounds::of_rect(outline.path.bounds(), outline.ts))
+                        .reduce(Bounds::union)
+                    else {
+                        // Nothing in this region is visible.
+                        return;
+                    };
+                    let Some(visible) = bounds.intersection(&area) else {
+                        return;
+                    };
+                    bounds = visible;
+                    // A rectangle around everything visible is a no-op;
+                    // producers emit page-sized ones on nearly every object.
+                    // 0.05 mm (0.2 px at 96 DPI) absorbs pt→mm rounding:
+                    // page clips often start ~0.02 mm inside the page.
+                    if !(region.len() == 1
+                        && is_axis_rect(&region[0])
+                        && area.contains(&visible_content, 0.05))
+                    {
+                        outlines.push(region);
+                    }
+                }
+                if outlines.is_empty() {
+                    out.extend(ops);
+                } else {
+                    out.push(Op::Clip {
+                        ops,
+                        regions: outlines,
+                        bounds,
+                    });
                 }
             }
         }
@@ -609,7 +756,7 @@ impl Builder<'_> {
                     out.push(Op::Fill {
                         path: path.clone(),
                         ts,
-                        color,
+                        shader: sk::Shader::SolidColor(color),
                         rule: sk::FillRule::Winding,
                         bounds,
                     });
@@ -621,7 +768,13 @@ impl Builder<'_> {
                     .clone()
                     .transform(sk::Transform::from_scale(scale as f32, -scale as f32));
                 if let Some(local) = local {
-                    push_stroke(Arc::new(local), to_ts(space), stroke.clone(), *color, out);
+                    push_stroke(
+                        Arc::new(local),
+                        to_ts(space),
+                        stroke.clone(),
+                        sk::Shader::SolidColor(*color),
+                        out,
+                    );
                 }
             }
         }
@@ -738,20 +891,69 @@ impl Builder<'_> {
     }
 }
 
+fn clip_region(shapes: &[ClipShape], parent: Matrix) -> Vec<ClipOutline> {
+    shapes
+        .iter()
+        .filter_map(|shape| {
+            Some(ClipOutline {
+                path: build_path(&shape.cmds)?,
+                ts: to_ts(parent.compose(shape.transform)),
+                rule: if shape.even_odd {
+                    sk::FillRule::EvenOdd
+                } else {
+                    sk::FillRule::Winding
+                },
+            })
+        })
+        .collect()
+}
+
+/// An outline that is an axis-aligned rectangle in page space.
+fn is_axis_rect(outline: &ClipOutline) -> bool {
+    if outline.ts.kx != 0.0 || outline.ts.ky != 0.0 {
+        return false;
+    }
+    let (mut moves, mut lines) = (0, 0);
+    for segment in outline.path.segments() {
+        match segment {
+            sk::PathSegment::MoveTo(_) => moves += 1,
+            sk::PathSegment::LineTo(_) => lines += 1,
+            sk::PathSegment::Close => {}
+            _ => return false,
+        }
+    }
+    let bounds = outline.path.bounds();
+    let on_edge = |value: f32, a: f32, b: f32| {
+        let tolerance = 1e-4 * (1.0 + a.abs().max(b.abs()));
+        (value - a).abs() <= tolerance || (value - b).abs() <= tolerance
+    };
+    let points = outline.path.points();
+    let straight = |a: &sk::Point, b: &sk::Point| a.x == b.x || a.y == b.y;
+    moves == 1
+        && (3..=4).contains(&lines)
+        && points.iter().all(|point| {
+            on_edge(point.x, bounds.left(), bounds.right())
+                && on_edge(point.y, bounds.top(), bounds.bottom())
+        })
+        && points.windows(2).all(|pair| straight(&pair[0], &pair[1]))
+        && straight(&points[0], &points[points.len() - 1])
+}
+
 fn push_path(path: Arc<sk::Path>, matrix: Matrix, style: &PathStyle, out: &mut Vec<Op>) {
     let ts = to_ts(matrix);
     let path_bounds = path.bounds();
     // usvg drops fills of zero-area paths (e.g. a filled straight line).
     if style.fill
-        && let Some(fill) = style.fill_color
         && path_bounds.width() > 0.0
         && path_bounds.height() > 0.0
+        && let Some(shader) =
+            paint_shader(style.fill_shading.as_ref(), style.fill_color, style.opacity)
         && let Some(bounds) = Bounds::of_rect(path_bounds, ts)
     {
         out.push(Op::Fill {
             path: path.clone(),
             ts,
-            color: color(fill.r, fill.g, fill.b, fill.opacity() * style.opacity),
+            shader,
             rule: if style.even_odd {
                 sk::FillRule::EvenOdd
             } else {
@@ -761,16 +963,67 @@ fn push_path(path: Arc<sk::Path>, matrix: Matrix, style: &PathStyle, out: &mut V
         });
     }
     if style.stroke
-        && let Some(stroke_color) = style.stroke_color
+        && let Some(shader) = paint_shader(
+            style.stroke_shading.as_ref(),
+            style.stroke_color,
+            style.opacity,
+        )
         && let Some(stroke) = stroke_style(style)
     {
-        let color = color(
-            stroke_color.r,
-            stroke_color.g,
-            stroke_color.b,
-            stroke_color.opacity() * style.opacity,
-        );
-        push_stroke(path, ts, stroke, color, out);
+        push_stroke(path, ts, stroke, shader, out);
+    }
+}
+
+/// A gradient when the shading is drawable, else the plain colour.
+fn paint_shader(
+    shading: Option<&Shading>,
+    fallback: Option<super::Color>,
+    opacity: f64,
+) -> Option<sk::Shader<'static>> {
+    if let Some(shader) = shading.and_then(|shading| gradient_shader(shading, opacity)) {
+        return Some(shader);
+    }
+    let fill = fallback?;
+    Some(sk::Shader::SolidColor(color(
+        fill.r,
+        fill.g,
+        fill.b,
+        fill.opacity() * opacity,
+    )))
+}
+
+fn gradient_shader(shading: &Shading, opacity: f64) -> Option<sk::Shader<'static>> {
+    let stops: Vec<sk::GradientStop> = shading
+        .resolved_stops()
+        .into_iter()
+        .map(|(position, c)| {
+            sk::GradientStop::new(position as f32, color(c.r, c.g, c.b, c.opacity() * opacity))
+        })
+        .collect();
+    let mode = match shading.spread {
+        ShadingSpread::Pad => sk::SpreadMode::Pad,
+        ShadingSpread::Repeat => sk::SpreadMode::Repeat,
+        ShadingSpread::Reflect => sk::SpreadMode::Reflect,
+    };
+    let point = |(x, y): (f64, f64)| sk::Point::from_xy(x as f32, y as f32);
+    match shading.kind {
+        ShadingKind::Axial { start, end } => sk::LinearGradient::new(
+            point(start),
+            point(end),
+            stops,
+            mode,
+            sk::Transform::identity(),
+        ),
+        ShadingKind::Radial {
+            start, end, radius, ..
+        } => sk::RadialGradient::new(
+            point(start),
+            point(end),
+            radius as f32,
+            stops,
+            mode,
+            sk::Transform::identity(),
+        ),
     }
 }
 
@@ -778,7 +1031,7 @@ fn push_stroke(
     path: Arc<sk::Path>,
     ts: sk::Transform,
     stroke: sk::Stroke,
-    color: sk::Color,
+    shader: sk::Shader<'static>,
     out: &mut Vec<Op>,
 ) {
     // Miter joins extend at most limit/2 widths; square caps less.
@@ -798,7 +1051,7 @@ fn push_stroke(
     out.push(Op::Stroke {
         path,
         ts,
-        color,
+        shader,
         stroke,
         bounds,
     });

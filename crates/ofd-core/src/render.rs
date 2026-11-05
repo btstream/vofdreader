@@ -142,6 +142,101 @@ pub enum Item {
         items: Vec<Item>,
         opacity: f64,
     },
+    /// Object-level `Clips`: `items` are visible only where every region
+    /// overlaps (regions intersect; the shapes inside one region unite).
+    Clip {
+        regions: Vec<Vec<ClipShape>>,
+        items: Vec<Item>,
+    },
+}
+
+/// One clip outline, in the same coordinate space as the clipped items'
+/// parent (the object's Boundary origin and the Area CTM are folded in).
+#[derive(Debug, Clone)]
+pub struct ClipShape {
+    pub transform: Matrix,
+    pub cmds: Vec<PathCmd>,
+    pub even_odd: bool,
+}
+
+/// `AxialShd` / `RadialShd` gradient in the path's own coordinates.
+#[derive(Debug, Clone)]
+pub struct Shading {
+    pub kind: ShadingKind,
+    /// Raw `Segment` stops, positions in 0..=1, ascending.
+    pub stops: Vec<(f64, Color)>,
+    pub extend_start: bool,
+    pub extend_end: bool,
+    pub spread: ShadingSpread,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShadingKind {
+    Axial {
+        start: (f64, f64),
+        end: (f64, f64),
+    },
+    /// Focal point `start` (radius `start_radius`) to circle `end`/`radius`.
+    Radial {
+        start: (f64, f64),
+        start_radius: f64,
+        end: (f64, f64),
+        radius: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadingSpread {
+    Pad,
+    Repeat,
+    Reflect,
+}
+
+impl Shading {
+    /// Stops as both backends draw them. A non-zero start radius maps onto
+    /// the start_radius/radius..1 part of the gradient (both backends only
+    /// support a zero focal radius), and an end that must not extend gets a
+    /// transparent guard stop so padding leaves it unpainted.
+    pub fn resolved_stops(&self) -> Vec<(f64, Color)> {
+        const GUARD: f64 = 1e-4;
+        let offset = match self.kind {
+            ShadingKind::Radial {
+                start_radius,
+                radius,
+                ..
+            } if radius > 0.0 && start_radius > 0.0 => (start_radius / radius).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        let mut stops: Vec<(f64, Color)> = self
+            .stops
+            .iter()
+            .map(|(position, color)| (offset + position.clamp(0.0, 1.0) * (1.0 - offset), *color))
+            .collect();
+        if self.spread != ShadingSpread::Pad || stops.is_empty() {
+            return stops;
+        }
+        let clear = |color: Color| Color { a: 0, ..color };
+        if !self.extend_start {
+            let first = stops[0].1;
+            for stop in &mut stops {
+                stop.0 = stop.0.max(offset + GUARD);
+            }
+            stops.insert(0, (offset, clear(first)));
+            if offset > 0.0 {
+                stops.insert(0, (0.0, clear(first)));
+            }
+        } else if offset > 0.0 {
+            stops.insert(0, (0.0, stops[0].1));
+        }
+        if !self.extend_end {
+            let last = stops[stops.len() - 1].1;
+            for stop in &mut stops {
+                stop.0 = stop.0.min(1.0 - GUARD);
+            }
+            stops.push((1.0, clear(last)));
+        }
+        stops
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +269,9 @@ pub struct PathStyle {
     pub dash: Vec<f64>,
     pub opacity: f64,
     pub even_odd: bool,
+    /// Gradient that replaces `fill_color` / `stroke_color` when present.
+    pub fill_shading: Option<Shading>,
+    pub stroke_shading: Option<Shading>,
 }
 
 impl Default for PathStyle {
@@ -194,6 +292,8 @@ impl Default for PathStyle {
             dash: Vec::new(),
             opacity: 1.0,
             even_odd: false,
+            fill_shading: None,
+            stroke_shading: None,
         }
     }
 }
@@ -525,7 +625,10 @@ impl OfdDocument {
                 height: seal.height,
                 mime: seal.mime,
                 data: seal.data.as_ref().clone(),
-                blend: None,
+                // Many stamp images are opaque (white paper around red ink).
+                // Multiply keeps the ink and lets the page show through the
+                // white, like a real stamp; transparent stamps are unchanged.
+                blend: Some("Multiply".to_string()),
                 clip: seal.clip,
             });
         }
@@ -884,7 +987,9 @@ impl PageRenderer {
         ) {
             for item in items {
                 match item {
-                    Item::Group { items, .. } => visit(renderer, doc, items, report),
+                    Item::Group { items, .. } | Item::Clip { items, .. } => {
+                        visit(renderer, doc, items, report)
+                    }
                     Item::Text { chars, style, .. } => {
                         let embedded = doc
                             .resources
@@ -1203,6 +1308,7 @@ fn walk_block(
             style.apply(&param);
         }
 
+        let start = items.len();
         match name {
             "Layer" | "PageBlock" => {
                 walk_block(doc, child_node, items, &style, warnings);
@@ -1229,7 +1335,166 @@ fn walk_block(
             }
             _ => {}
         }
+
+        if name != "Layer"
+            && name != "PageBlock"
+            && items.len() > start
+            && let Some(regions) = parse_clips(child_node, warnings)
+        {
+            let clipped = items.split_off(start);
+            items.push(Item::Clip {
+                regions,
+                items: clipped,
+            });
+        }
     }
+}
+
+/// Object `Clips` as parent-space regions.
+///
+/// Clip geometry lives in the object's Boundary space:
+/// `T(Boundary) · Area.CTM · T(Path.Boundary) · Path.CTM`. With
+/// `TransFlag="true"` it is also transformed by the object CTM (producers
+/// then write e.g. a unit square for an image). Each `Clip` is one region
+/// (its `Area`s unite); regions intersect. Text areas are not supported and
+/// leave their region out, which never hides content.
+fn parse_clips(
+    node: roxmltree::Node<'_, '_>,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<Vec<ClipShape>>> {
+    let clips = child(node, "Clips")?;
+    let (x, y) = node
+        .attribute("Boundary")
+        .and_then(crate::model::parse_box)
+        .map(|(x, y, _, _)| (x, y))
+        .unwrap_or((0.0, 0.0));
+    let mut origin = Matrix::translate(x, y);
+    if clips
+        .attribute("TransFlag")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        && let Some(ctm) = node.attribute("CTM").and_then(Matrix::parse)
+    {
+        origin = origin.compose(ctm);
+    }
+    let mut regions = Vec::new();
+    for clip in children(clips, "Clip") {
+        let mut region = Vec::new();
+        let mut complete = true;
+        for area in children(clip, "Area") {
+            let area_ctm = area
+                .attribute("CTM")
+                .and_then(Matrix::parse)
+                .unwrap_or(Matrix::IDENTITY);
+            let Some(path) = child(area, "Path") else {
+                complete = false;
+                continue;
+            };
+            let Some(cmds) = child_text(path, "AbbreviatedData")
+                .and_then(|data| parse_path_data(data, warnings))
+                .filter(|cmds| !cmds.is_empty())
+            else {
+                complete = false;
+                continue;
+            };
+            let (path_x, path_y) = path
+                .attribute("Boundary")
+                .and_then(crate::model::parse_box)
+                .map(|(x, y, _, _)| (x, y))
+                .unwrap_or((0.0, 0.0));
+            let path_ctm = path
+                .attribute("CTM")
+                .and_then(Matrix::parse)
+                .unwrap_or(Matrix::IDENTITY);
+            region.push(ClipShape {
+                transform: origin
+                    .compose(area_ctm)
+                    .compose(Matrix::translate(path_x, path_y))
+                    .compose(path_ctm),
+                cmds,
+                even_odd: path
+                    .attribute("Rule")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("Even-Odd")),
+            });
+        }
+        if !complete {
+            warnings.push("裁剪区含不支持的文字或无效路径，已忽略该裁剪区".to_string());
+        } else if !region.is_empty() {
+            regions.push(region);
+        }
+    }
+    (!regions.is_empty()).then_some(regions)
+}
+
+/// `AxialShd` / `RadialShd` inside a `FillColor` or `StrokeColor`.
+fn parse_shading(color: roxmltree::Node<'_, '_>) -> Option<Shading> {
+    let node = child(color, "AxialShd").or_else(|| child(color, "RadialShd"))?;
+    let point = |name: &str| -> Option<(f64, f64)> {
+        let mut values = node.attribute(name)?.split_whitespace();
+        Some((values.next()?.parse().ok()?, values.next()?.parse().ok()?))
+    };
+    let kind = if node.tag_name().name() == "AxialShd" {
+        ShadingKind::Axial {
+            start: point("StartPoint")?,
+            end: point("EndPoint")?,
+        }
+    } else {
+        ShadingKind::Radial {
+            start: point("StartPoint")?,
+            start_radius: attribute_f64(node, "StartRadius").unwrap_or(0.0).max(0.0),
+            end: point("EndPoint")?,
+            radius: attribute_f64(node, "EndRadius")?,
+        }
+    };
+    let segments: Vec<_> = children(node, "Segment").collect();
+    let count = segments.len();
+    let mut stops = Vec::with_capacity(count);
+    for (index, segment) in segments.into_iter().enumerate() {
+        let Some(color) = child(segment, "Color") else {
+            continue;
+        };
+        let Some(value) = color.attribute("Value").and_then(|value| {
+            Color::parse(
+                value,
+                color
+                    .attribute("Alpha")
+                    .and_then(|alpha| alpha.parse::<u8>().ok())
+                    .unwrap_or(255),
+            )
+        }) else {
+            continue;
+        };
+        let default = if count > 1 {
+            index as f64 / (count - 1) as f64
+        } else {
+            0.0
+        };
+        let position = attribute_f64(segment, "Position")
+            .filter(|position| position.is_finite())
+            .unwrap_or(default)
+            .clamp(0.0, 1.0);
+        stops.push((position, value));
+    }
+    if stops.is_empty() {
+        return None;
+    }
+    // Keep document order for equal positions (hard colour steps).
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let extend = node
+        .attribute("Extend")
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0);
+    let spread = match node.attribute("MapType") {
+        Some(value) if value.eq_ignore_ascii_case("Repeat") => ShadingSpread::Repeat,
+        Some(value) if value.eq_ignore_ascii_case("Reflect") => ShadingSpread::Reflect,
+        _ => ShadingSpread::Pad,
+    };
+    Some(Shading {
+        kind,
+        stops,
+        extend_start: extend & 1 != 0,
+        extend_end: extend & 2 != 0,
+        spread,
+    })
 }
 
 /// `CompositeObject` references a reusable `CompositeGraphicUnit` resource.
@@ -1740,7 +2005,9 @@ fn collect_text_matches(items: &[Item], query: &str, out: &mut Vec<TextMatchRect
                     from = end;
                 }
             }
-            Item::Group { items, .. } => collect_text_matches(items, query, out),
+            Item::Group { items, .. } | Item::Clip { items, .. } => {
+                collect_text_matches(items, query, out)
+            }
             _ => {}
         }
     }
@@ -1925,18 +2192,15 @@ fn parse_path_object(
         style.apply(&param);
     }
 
-    if node
+    // OFD 8.2 表 41: a path is stroked by default and is **not** filled.
+    // FillColor alone (including a colour inherited from a layer DrawParam)
+    // must not turn on filling; text objects have the opposite defaults.
+    style.fill = node
         .attribute("Fill")
-        .is_some_and(|value| value.eq_ignore_ascii_case("false"))
-    {
-        style.fill = false;
-    }
-    if node
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+    style.stroke = node
         .attribute("Stroke")
-        .is_some_and(|value| value.eq_ignore_ascii_case("false"))
-    {
-        style.stroke = false;
-    }
+        .is_none_or(|value| !(value.eq_ignore_ascii_case("false") || value == "0"));
     if let Some(width) = node
         .attribute("LineWidth")
         .and_then(|value| value.parse::<f64>().ok())
@@ -1972,6 +2236,8 @@ fn parse_path_object(
                 .unwrap_or(255),
         );
     }
+    style.fill_shading = child(node, "FillColor").and_then(parse_shading);
+    style.stroke_shading = child(node, "StrokeColor").and_then(parse_shading);
     if let Some(color) = child(node, "StrokeColor")
         && let Some(value) = color.attribute("Value")
     {
@@ -2337,8 +2603,24 @@ fn write_item_with_fonts(
             style,
         } => {
             let _ = write!(out, r#"<g transform="{}">"#, transform.svg());
+            let fill_gradient = style
+                .fill
+                .then_some(style.fill_shading.as_ref())
+                .flatten()
+                .map(|shading| write_gradient(out, shading));
+            let stroke_gradient = style
+                .stroke
+                .then_some(style.stroke_shading.as_ref())
+                .flatten()
+                .map(|shading| write_gradient(out, shading));
             let _ = write!(out, r#"<path d="{}""#, path_data(cmds));
-            if style.fill {
+            if let Some(id) = &fill_gradient {
+                let _ = write!(
+                    out,
+                    r#" fill="url(#{id})" fill-opacity="{}""#,
+                    num(style.opacity)
+                );
+            } else if style.fill {
                 if let Some(color) = style.fill_color {
                     let _ = write!(
                         out,
@@ -2353,12 +2635,17 @@ fn write_item_with_fonts(
                 let _ = write!(out, r#" fill="none""#);
             }
             if style.stroke {
-                if let Some(color) = style.stroke_color {
+                let paint = match (&stroke_gradient, style.stroke_color) {
+                    (Some(id), _) => Some((format!("url(#{id})"), style.opacity)),
+                    (None, Some(color)) => Some((color.hex(), color.opacity() * style.opacity)),
+                    (None, None) => None,
+                };
+                if let Some((paint, opacity)) = paint {
                     let _ = write!(
                         out,
                         r#" stroke="{}" stroke-opacity="{}" stroke-width="{}""#,
-                        color.hex(),
-                        num(color.opacity() * style.opacity),
+                        paint,
+                        num(opacity),
                         num(style.line_width)
                     );
                     if !style.dash.is_empty() {
@@ -2539,7 +2826,91 @@ fn write_item_with_fonts(
             }
             out.push_str("</g>");
         }
+        Item::Clip { regions, items } => {
+            // One nested group per region: nested clip-paths intersect,
+            // children of one clipPath unite.
+            for region in regions {
+                let id = next_svg_id("clip");
+                let _ = write!(
+                    out,
+                    r#"<defs><clipPath id="{id}" clipPathUnits="userSpaceOnUse">"#
+                );
+                for shape in region {
+                    let _ = write!(
+                        out,
+                        r#"<path transform="{}" d="{}" clip-rule="{}"/>"#,
+                        shape.transform.svg(),
+                        path_data(&shape.cmds),
+                        if shape.even_odd { "evenodd" } else { "nonzero" }
+                    );
+                }
+                let _ = write!(out, r#"</clipPath></defs><g clip-path="url(#{id})">"#);
+            }
+            for item in items {
+                write_item_with_fonts(out, item, families, glyph_fonts);
+            }
+            for _ in regions {
+                out.push_str("</g>");
+            }
+        }
     }
+}
+
+/// Document-unique ids for inline `<defs>`.
+fn next_svg_id(prefix: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{prefix}-{id}")
+}
+
+/// Writes a `userSpaceOnUse` gradient (path coordinates) and returns its id.
+fn write_gradient(out: &mut String, shading: &Shading) -> String {
+    let id = next_svg_id("shd");
+    let spread = match shading.spread {
+        ShadingSpread::Pad => "pad",
+        ShadingSpread::Repeat => "repeat",
+        ShadingSpread::Reflect => "reflect",
+    };
+    out.push_str("<defs>");
+    match shading.kind {
+        ShadingKind::Axial { start, end } => {
+            let _ = write!(
+                out,
+                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" spreadMethod="{spread}" x1="{}" y1="{}" x2="{}" y2="{}">"#,
+                num(start.0),
+                num(start.1),
+                num(end.0),
+                num(end.1)
+            );
+        }
+        ShadingKind::Radial {
+            start, end, radius, ..
+        } => {
+            let _ = write!(
+                out,
+                r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" spreadMethod="{spread}" cx="{}" cy="{}" r="{}" fx="{}" fy="{}">"#,
+                num(end.0),
+                num(end.1),
+                num(radius),
+                num(start.0),
+                num(start.1)
+            );
+        }
+    }
+    for (offset, color) in shading.resolved_stops() {
+        let _ = write!(
+            out,
+            r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
+            num(offset),
+            color.hex(),
+            num(color.opacity())
+        );
+    }
+    out.push_str(match shading.kind {
+        ShadingKind::Axial { .. } => "</linearGradient></defs>",
+        ShadingKind::Radial { .. } => "</radialGradient></defs>",
+    });
+    id
 }
 
 fn path_data(cmds: &[PathCmd]) -> String {
@@ -3296,5 +3667,53 @@ mod tests {
             parse_path_data("M 0 0 L 10 0 Q 12 0 12 2 B 12 4 10 6 8 6 C", &mut warnings).unwrap();
         assert_eq!(cmds.len(), 5);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn layer_fill_colour_does_not_turn_on_path_filling() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("path-fill.ofd");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        for (name, content) in [
+            (
+                "OFD.xml",
+                r#"<OFD><DocBody><DocRoot>Doc/Document.xml</DocRoot></DocBody></OFD>"#,
+            ),
+            (
+                "Doc/Document.xml",
+                r#"<Document><CommonData><PublicRes>Res.xml</PublicRes><PageArea><PhysicalBox>0 0 100 100</PhysicalBox></PageArea></CommonData><Pages><Page ID="1" BaseLoc="Page.xml"/></Pages></Document>"#,
+            ),
+            (
+                "Doc/Res.xml",
+                r#"<Res><DrawParams><DrawParam ID="2"><FillColor Value="255 0 0"/></DrawParam></DrawParams></Res>"#,
+            ),
+            (
+                "Doc/Page.xml",
+                r#"<Page><Content><Layer DrawParam="2"><PathObject Boundary="0 0 20 20"><StrokeColor Value="255 0 0"/><AbbreviatedData>M 0 0 L 20 0 L 20 20 L 0 20 C</AbbreviatedData></PathObject><TextObject Boundary="30 0 20 5" Size="3"><TextCode X="0" Y="3">A</TextCode></TextObject></Layer></Content></Page>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let doc = OfdDocument::open(path).unwrap();
+        let page = doc.display_list(0).unwrap();
+        let Item::Path { style, .. } = &page.items[0] else {
+            panic!("expected path")
+        };
+        // OFD 8.2 表 41: no Fill attribute means no fill, even when the layer
+        // DrawParam supplies a fill colour.
+        assert!(!style.fill);
+        assert!(style.stroke);
+        assert_eq!(style.stroke_color.unwrap().hex(), "#FF0000");
+
+        // Text still inherits the layer colour (text is filled by default).
+        let Item::Text { style, .. } = &page.items[1] else {
+            panic!("expected text")
+        };
+        assert_eq!(style.color.hex(), "#FF0000");
     }
 }

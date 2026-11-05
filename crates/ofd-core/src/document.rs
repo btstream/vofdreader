@@ -304,7 +304,7 @@ impl OfdDocument {
                             out.push(text);
                         }
                     }
-                    Item::Group { items, .. } => collect(items, out),
+                    Item::Group { items, .. } | Item::Clip { items, .. } => collect(items, out),
                     _ => {}
                 }
             }
