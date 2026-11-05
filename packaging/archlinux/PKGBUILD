@@ -30,6 +30,11 @@ optdepends=(
 )
 provides=('vofdreader')
 conflicts=('vofdreader')
+# makepkg's lto option adds -flto=auto to CFLAGS. That turns
+# wayland-backend's C shim into GCC LTO objects, which the clang/mold link
+# driven by rustc cannot read without a plugin. Cargo already does thin LTO
+# through [profile.release], so only disable makepkg's C-side LTO injection.
+options=('!lto')
 source=('vofdreader::git+https://github.com/btstream/vofdreader.git#branch=main')
 sha256sums=('SKIP')
 
