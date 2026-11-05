@@ -1,0 +1,17 @@
+[package]
+name = "ofd-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GPUI desktop reader for OFD documents"
+
+[dependencies]
+ofd-core = { path = "../ofd-core" }
+gpui-kit = { version = "=0.9.0", default-features = false, features = ["component", "assets"] }
+image = { version = "0.25", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

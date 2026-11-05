@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# 真实 OFD 样本：默认不入库（含个人信息/发票信息）
+/*.ofd
+/resources/
+/fixtures/private/
+*.ofd.local
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 允许提交脱敏后的公开测试样本，例如：
+# !fixtures/public/*.ofd

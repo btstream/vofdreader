@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1488" height="948" viewBox="0 0 1488 948" font-family="'Source Han Sans CN','Noto Sans CJK SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <filter id="winShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#0B1220" flood-opacity="0.22"/>
+    </filter>
+    <filter id="pageShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#101828" flood-opacity="0.16"/>
+    </filter>
+    <filter id="barShadow" x="-20%" y="-40%" width="140%" height="200%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#101828" flood-opacity="0.14"/>
+    </filter>
+    <linearGradient id="appIcon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4A86FF"/>
+      <stop offset="1" stop-color="#1F56D6"/>
+    </linearGradient>
+    <radialGradient id="canvasBg" cx="0.5" cy="0.42" r="0.85">
+      <stop offset="0" stop-color="#F2F4F7"/>
+      <stop offset="1" stop-color="#E5E8ED"/>
+    </radialGradient>
+    <pattern id="dotGrid" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#CBD2DC" opacity="0.55"/>
+    </pattern>
+    <clipPath id="winClip">
+      <rect x="24" y="24" width="1440" height="900" rx="14"/>
+    </clipPath>
+    <clipPath id="pageClip">
+      <rect x="619" y="144" width="490" height="693"/>
+    </clipPath>
+    <symbol id="i-folder" viewBox="0 0 16 16">
+      <path d="M2.2 4.6c0-.6.4-1 1-1h3.2l1.5 1.8h4.9c.6 0 1 .4 1 1v5.9c0 .6-.4 1-1 1H3.2c-.6 0-1-.4-1-1z"/>
+    </symbol>
+    <symbol id="i-sidebar" viewBox="0 0 16 16">
+      <rect x="2.5" y="3.2" width="11" height="9.6" rx="1.6"/>
+      <path d="M6.6 3.2v9.6"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 16 16">
+      <circle cx="7.1" cy="7.1" r="3.9"/>
+      <path d="m10.1 10.1 3 3"/>
+    </symbol>
+    <symbol id="i-print" viewBox="0 0 16 16">
+      <path d="M5 5.5V2.8h6v2.7"/>
+      <rect x="2.8" y="5.5" width="10.4" height="6" rx="1.2"/>
+      <rect x="5" y="9.4" width="6" height="3.8" rx="0.4"/>
+    </symbol>
+    <symbol id="i-export" viewBox="0 0 16 16">
+      <path d="M8 2.5v7.2"/>
+      <path d="m5.2 7 2.8 2.8L10.8 7"/>
+      <path d="M3 11v1.6c0 .5.4.9.9.9h8.2c.5 0 .9-.4.9-.9V11"/>
+    </symbol>
+    <symbol id="i-sun" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="3"/>
+      <path d="M8 1.6v1.4M8 13v1.4M1.6 8h1.4M13 8h1.4M3.5 3.5l1 1M11.5 11.5l1 1M12.5 3.5l-1 1M4.5 11.5l-1 1"/>
+    </symbol>
+    <symbol id="i-sliders" viewBox="0 0 16 16">
+      <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+      <circle cx="5.5" cy="4.5" r="1.5"/>
+      <circle cx="10.5" cy="8" r="1.5"/>
+      <circle cx="6.5" cy="11.5" r="1.5"/>
+    </symbol>
+    <symbol id="i-more" viewBox="0 0 16 16">
+      <circle cx="3.2" cy="8" r="1.15" fill="currentColor" stroke="none"/>
+      <circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"/>
+      <circle cx="12.8" cy="8" r="1.15" fill="currentColor" stroke="none"/>
+    </symbol>
+    <symbol id="i-minus" viewBox="0 0 16 16">
+      <path d="M3.5 8h9"/>
+    </symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16">
+      <path d="M3.5 8h9M8 3.5v9"/>
+    </symbol>
+    <symbol id="i-fit-width" viewBox="0 0 16 16">
+      <path d="M4.2 8h7.6M5.8 6.4 4.2 8l1.6 1.6M10.2 6.4 11.8 8l-1.6 1.6"/>
+    </symbol>
+    <symbol id="i-fit-page" viewBox="0 0 16 16">
+      <path d="M2.8 6V3.8c0-.55.45-1 1-1H6M10 2.8h2.2c.55 0 1 .45 1 1V6M13.2 10v2.2c0 .55-.45 1-1 1H10M6 13.2H3.8c-.55 0-1-.45-1-1V10"/>
+    </symbol>
+    <symbol id="i-rotate" viewBox="0 0 16 16">
+      <path d="M13 8a5 5 0 1 1-1.6-3.7"/>
+      <path d="M13.2 2.8v2.8h-2.8"/>
+    </symbol>
+    <symbol id="i-grid" viewBox="0 0 16 16">
+      <rect x="2.5" y="2.5" width="4.4" height="4.4" rx="1"/>
+      <rect x="9.1" y="2.5" width="4.4" height="4.4" rx="1"/>
+      <rect x="2.5" y="9.1" width="4.4" height="4.4" rx="1"/>
+      <rect x="9.1" y="9.1" width="4.4" height="4.4" rx="1"/>
+    </symbol>
+    <symbol id="i-rows" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="18" height="18" rx="2"/>
+      <path d="M21 9H3M21 15H3"/>
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 16 16">
+      <path d="M8 2.2 13 4v3.3c0 3-2.1 5.4-5 6.3-2.9-.9-5-3.3-5-6.3V4z"/>
+      <path d="m5.7 5.7 4.6 4.6"/>
+    </symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 16 16">
+      <path d="m5.2 6.4 2.8 2.8 2.8-2.8"/>
+    </symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 16 16">
+      <path d="M9.6 4.4 6 8l3.6 3.6"/>
+    </symbol>
+  </defs>
+
+  <rect x="24" y="24" width="1440" height="900" rx="14" fill="#FFFFFF" filter="url(#winShadow)"/>
+
+  <g clip-path="url(#winClip)">
+    <!-- ============ 标题栏 ============ -->
+    <rect x="24" y="24" width="1440" height="44" fill="#FBFBFC"/>
+    <path d="M24 68h1440" stroke="#E9EBEF" stroke-width="1"/>
+
+    <rect x="44" y="34" width="20" height="20" rx="5" fill="url(#appIcon)"/>
+    <path d="M49.5 39.5h5.2l2.8 2.8v6.2h-8z" fill="#FFFFFF" opacity="0.96"/>
+    <path d="M54.7 39.5v2.8h2.8" fill="none" stroke="#2F6FEB" stroke-width="1"/>
+    <circle cx="56.5" cy="46.5" r="1.5" fill="#FF6B6B"/>
+
+    <text x="72" y="52" font-size="13" font-weight="600" fill="#1B1E25">VofdReader</text>
+    <path d="M126 37v14" stroke="#E4E7EC"/>
+    <text x="138" y="52" font-size="12.5" fill="#3F4652">增值税电子化服务通知.ofd</text>
+    <text x="312" y="52" font-size="12" fill="#98A1AF">· 6 页</text>
+
+    <!-- 窗口控制 -->
+    <path d="M1372 46h12" stroke="#6B7280" stroke-width="1.4" stroke-linecap="round"/>
+    <rect x="1402" y="40" width="12" height="12" rx="1.6" fill="none" stroke="#6B7280" stroke-width="1.2"/>
+    <path d="m1432 40 12 12M1444 40l-12 12" stroke="#6B7280" stroke-width="1.4" stroke-linecap="round"/>
+
+    <!-- ============ 工具栏 ============ -->
+    <rect x="24" y="68" width="1440" height="52" fill="#FFFFFF"/>
+    <path d="M24 120h1440" stroke="#E9EBEF" stroke-width="1"/>
+
+    <rect x="44" y="78" width="78" height="32" rx="8" fill="#2F6FEB"/>
+    <use href="#i-folder" x="56" y="86" width="16" height="16" color="#FFFFFF" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="78" y="98" font-size="12.5" font-weight="500" fill="#FFFFFF">打开</text>
+
+    <rect x="132" y="78" width="32" height="32" rx="7" fill="#EDF2FE"/>
+    <use href="#i-sidebar" x="140" y="86" width="16" height="16" color="#2F6FEB" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <a href="02-search-dark.svg" target="_top">
+      <rect x="168" y="78" width="32" height="32" rx="7" fill="#FFFFFF"/>
+      <use href="#i-search" x="176" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </a>
+    <path d="M226 82v20" stroke="#E7E9ED"/>
+
+    <use href="#i-print" x="1171" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1195" y="98" font-size="12" fill="#4B5563">打印</text>
+    <use href="#i-export" x="1249" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1273" y="98" font-size="12" fill="#4B5563">导出</text>
+    <path d="M1318 82v20" stroke="#E7E9ED"/>
+    <use href="#i-sun" x="1336" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <a href="03-settings-light.svg" target="_top">
+      <rect x="1364" y="78" width="32" height="32" rx="7" fill="#000000" opacity="0.001"/>
+    </a>
+    <use href="#i-sliders" x="1372" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <use href="#i-more" x="1408" y="86" width="16" height="16" color="#5B6472" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- ============ 侧边栏 ============ -->
+    <rect x="24" y="120" width="240" height="776" fill="#F6F7F9"/>
+    <path d="M264 120v776" stroke="#E5E7EB"/>
+
+    <text x="44" y="145" font-size="11.5" font-weight="600" fill="#1B1E25">缩略图</text>
+    <text x="104" y="145" font-size="11.5" fill="#7A8393">目录</text>
+    <text x="152" y="145" font-size="11.5" fill="#7A8393">书签</text>
+    <rect x="44" y="157" width="36" height="2" rx="1" fill="#2F6FEB"/>
+    <path d="M24 160h240" stroke="#EBEDF1"/>
+
+    <text x="44" y="178" font-size="10" fill="#98A1AF">页面</text>
+    <text x="244" y="178" font-size="10" fill="#98A1AF" text-anchor="end">6</text>
+
+    <!-- 缩略图 1（当前页） -->
+    <rect x="41" y="189" width="84" height="116" rx="6" fill="#EAF0FE"/>
+    <rect x="44" y="192" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#2F6FEB" stroke-width="2"/>
+    <g transform="translate(44,192)">
+      <rect x="9" y="8" width="60" height="4" rx="1" fill="#D8DEE8"/>
+      <rect x="27" y="15" width="24" height="2.4" rx="1.2" fill="#E5E9F0"/>
+      <rect x="14" y="24" width="50" height="3.4" rx="1" fill="#C9D1DD"/>
+      <rect x="14" y="30" width="38" height="3.4" rx="1" fill="#C9D1DD"/>
+      <rect x="10" y="40" width="58" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="45" width="58" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="50" width="58" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="55" width="46" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="63" width="36" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="68" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="73" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="78" width="42" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <circle cx="50" cy="92" r="10" fill="none" stroke="#E39AA5" stroke-width="1"/>
+    </g>
+    <text x="83" y="320" font-size="10" font-weight="600" fill="#2F6FEB" text-anchor="middle">1</text>
+
+    <!-- 缩略图 2 -->
+    <rect x="138" y="192" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#DDE1E7"/>
+    <g transform="translate(138,192)">
+      <rect x="10" y="9" width="34" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="14" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="19" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="24" width="42" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="32" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="37" width="46" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="42" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="50" width="50" height="16" rx="1" fill="#F7F9FC" stroke="#EEF1F6"/>
+      <rect x="10" y="72" width="50" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <rect x="10" y="77" width="38" height="1.6" rx="0.8" fill="#E8ECF2"/>
+      <circle cx="48" cy="92" r="9" fill="none" stroke="#E39AA5" stroke-width="1"/>
+    </g>
+    <text x="177" y="320" font-size="10" fill="#98A1AF" text-anchor="middle">2</text>
+
+    <!-- 缩略图 3 -->
+    <rect x="44" y="338" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#DDE1E7"/>
+    <g transform="translate(44,338)">
+      <rect x="10" y="9" width="40" height="2.4" rx="1.2" fill="#D8DEE8"/>
+      <rect x="10" y="17" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="24" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="31" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="38" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="47" width="58" height="42" rx="1" fill="none" stroke="#DFE4EC"/>
+      <path d="M10 61h58M10 75h58M30 47v42M49 47v42" stroke="#E8ECF2" stroke-width="1"/>
+      <rect x="10" y="96" width="32" height="1.6" rx="0.8" fill="#E8ECF2"/>
+    </g>
+    <text x="83" y="466" font-size="10" fill="#98A1AF" text-anchor="middle">3</text>
+
+    <!-- 缩略图 4 -->
+    <rect x="138" y="338" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#DDE1E7"/>
+    <g transform="translate(138,338)">
+      <rect x="10" y="9" width="58" height="30" rx="1" fill="#F4F7FB"/>
+      <rect x="10" y="44" width="50" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="50" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="56" width="44" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="64" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="70" width="52" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="76" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="82" width="36" height="1.4" rx="0.7" fill="#E8ECF2"/>
+    </g>
+    <text x="177" y="466" font-size="10" fill="#98A1AF" text-anchor="middle">4</text>
+
+    <!-- 缩略图 5 -->
+    <rect x="44" y="484" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#DDE1E7"/>
+    <g transform="translate(44,484)">
+      <rect x="10" y="10" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="16" width="52" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="24" width="58" height="58" rx="1" fill="none" stroke="#DFE4EC"/>
+      <path d="M10 38h58M10 52h58M10 66h58M26 24v58M58 24v58" stroke="#E8ECF2" stroke-width="1"/>
+      <rect x="10" y="90" width="28" height="1.6" rx="0.8" fill="#E8ECF2"/>
+    </g>
+    <text x="83" y="612" font-size="10" fill="#98A1AF" text-anchor="middle">5</text>
+
+    <!-- 缩略图 6 -->
+    <rect x="138" y="484" width="78" height="110" rx="3" fill="#FFFFFF" stroke="#DDE1E7"/>
+    <g transform="translate(138,484)">
+      <rect x="10" y="9" width="50" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="15" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="21" width="42" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="30" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="36" width="50" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <rect x="10" y="42" width="58" height="1.4" rx="0.7" fill="#E8ECF2"/>
+      <circle cx="50" cy="82" r="14" fill="none" stroke="#E39AA5" stroke-width="1.2"/>
+      <path d="M45 78h10M45 84h10" stroke="#E39AA5" stroke-width="1"/>
+    </g>
+    <text x="177" y="612" font-size="10" fill="#98A1AF" text-anchor="middle">6</text>
+
+    <!-- 折叠侧栏 -->
+    <circle cx="264" cy="500" r="11" fill="#FFFFFF" stroke="#E1E5EB"/>
+    <use href="#i-chevron-left" x="257" y="493" width="14" height="14" color="#7A8393" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- 文档信息卡片 -->
+    <rect x="40" y="664" width="208" height="216" rx="10" fill="#FFFFFF" stroke="#E7E9ED"/>
+    <text x="56" y="690" font-size="10.5" font-weight="600" fill="#5B6472" letter-spacing="0.4">文档信息</text>
+    <path d="M56 702h176" stroke="#F0F2F5"/>
+    <text x="56" y="724" font-size="10.5" fill="#98A1AF">格式</text>
+    <text x="232" y="724" font-size="10.5" fill="#4B5563" text-anchor="end">OFD 1.0</text>
+    <text x="56" y="754" font-size="10.5" fill="#98A1AF">页面</text>
+    <text x="232" y="754" font-size="10.5" fill="#4B5563" text-anchor="end">6 页 · A4</text>
+    <text x="56" y="784" font-size="10.5" fill="#98A1AF">大小</text>
+    <text x="232" y="784" font-size="10.5" fill="#4B5563" text-anchor="end">2.4 MB</text>
+    <text x="56" y="814" font-size="10.5" fill="#98A1AF">创建</text>
+    <text x="232" y="814" font-size="10.5" fill="#4B5563" text-anchor="end">WPS Office</text>
+    <text x="56" y="844" font-size="10.5" fill="#98A1AF">修改</text>
+    <text x="232" y="844" font-size="10.5" fill="#4B5563" text-anchor="end">2026-10-28</text>
+
+    <!-- ============ 阅读区 ============ -->
+    <rect x="264" y="120" width="1200" height="776" fill="url(#canvasBg)"/>
+    <rect x="264" y="120" width="1200" height="776" fill="url(#dotGrid)" opacity="0.55"/>
+
+    <rect x="619" y="144" width="490" height="693" rx="2" fill="#FFFFFF" filter="url(#pageShadow)"/>
+    <g clip-path="url(#pageClip)">
+      <rect x="619" y="144" width="490" height="693" fill="#FFFFFF"/>
+      <g transform="translate(619,144)" font-family="'Source Han Serif CN','Noto Serif CJK SC','SimSun',serif">
+        <!-- 红头 -->
+        <text x="245" y="50" font-size="28" font-weight="700" fill="#C8102E" text-anchor="middle" letter-spacing="7">国家税务总局</text>
+        <text x="245" y="74" font-size="9" fill="#6B7280" text-anchor="middle" letter-spacing="0.5">税总发〔2026〕18号</text>
+        <path d="M45 86h400" stroke="#C8102E" stroke-width="2"/>
+
+        <!-- 标题 -->
+        <text x="245" y="116" font-size="17" font-weight="700" fill="#1A1D23" text-anchor="middle" letter-spacing="0.4">关于进一步优化增值税发票电子化服务</text>
+        <text x="245" y="142" font-size="17" font-weight="700" fill="#1A1D23" text-anchor="middle" letter-spacing="0.4">有关事项的通知</text>
+
+        <!-- 正文 -->
+        <text x="45" y="174" font-size="10" fill="#23262D">各省、自治区、直辖市和计划单列市税务局：</text>
+
+        <text x="64.6" y="198" font-size="9.8" fill="#2B3038">为深入贯彻落实《关于进一步深化税收征管改革的意见》，持续提升</text>
+        <text x="45" y="216" font-size="9.8" fill="#2B3038">纳税人缴费人办税体验，现就优化增值税发票电子化服务有关事项</text>
+        <text x="45" y="234" font-size="9.8" fill="#2B3038">通知如下。</text>
+
+        <text x="45" y="262" font-size="10" font-weight="700" fill="#1F242C">一、持续拓展电子发票服务平台功能</text>
+        <text x="64.6" y="281" font-size="9.8" fill="#2B3038">各地税务机关要进一步完善电子发票服务平台，支持纳税人通过网页端、</text>
+        <text x="45" y="299" font-size="9.8" fill="#2B3038">移动端等渠道开具、查询和下载电子发票，持续提升服务稳定性和办理效率。</text>
+
+        <text x="45" y="327" font-size="10" font-weight="700" fill="#1F242C">二、切实加强电子发票数据安全管理</text>
+        <text x="64.6" y="346" font-size="9.8" fill="#2B3038">严格执行数据安全和个人信息保护相关要求，规范发票数据的采集、存储、</text>
+        <text x="45" y="364" font-size="9.8" fill="#2B3038">使用和传输，切实保障纳税人合法权益。</text>
+
+        <text x="45" y="392" font-size="10" font-weight="700" fill="#1F242C">三、认真做好宣传辅导和服务保障</text>
+        <text x="64.6" y="411" font-size="9.8" fill="#2B3038">通过政策宣讲、操作培训等方式，帮助纳税人熟悉电子发票使用流程，及时</text>
+        <text x="45" y="429" font-size="9.8" fill="#2B3038">回应纳税人关切，确保各项工作平稳有序推进。</text>
+
+        <text x="45" y="457" font-size="10" font-weight="700" fill="#1F242C">四、持续跟踪政策实施效果</text>
+        <text x="64.6" y="476" font-size="9.8" fill="#2B3038">各地税务机关要加强工作统筹，及时总结推广典型经验做法，重大问题及时</text>
+        <text x="45" y="494" font-size="9.8" fill="#2B3038">报告税务总局。</text>
+
+        <!-- 落款与印章 -->
+        <text x="445" y="566" font-size="10" fill="#2B3038" text-anchor="end">国家税务总局</text>
+        <text x="445" y="584" font-size="10" fill="#2B3038" text-anchor="end">2026年10月28日</text>
+
+        <g transform="rotate(-8 362 566)" opacity="0.8">
+          <circle cx="362" cy="566" r="42" fill="none" stroke="#D3253A" stroke-width="2.2"/>
+          <text x="334.44" y="546.10" transform="rotate(305.83 334.44 546.10)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">国</text>
+          <text x="343.73" y="537.32" transform="rotate(327.50 343.73 537.32)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">家</text>
+          <text x="355.61" y="532.61" transform="rotate(349.17 355.61 532.61)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">税</text>
+          <text x="368.39" y="532.61" transform="rotate(10.83 368.39 532.61)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">务</text>
+          <text x="380.27" y="537.32" transform="rotate(32.50 380.27 537.32)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">总</text>
+          <text x="389.56" y="546.10" transform="rotate(54.17 389.56 546.10)" font-size="9" font-weight="600" fill="#D3253A" text-anchor="middle">局</text>
+          <polygon points="362,556 364.5,562.6 371.5,562.9 366.0,567.3 367.9,574 362,570.2 356.1,574 358.0,567.3 352.5,562.9 359.5,562.6" fill="#D3253A"/>
+        </g>
+
+        <text x="245" y="660" font-size="9" fill="#8A93A3" text-anchor="middle">— 1 —</text>
+      </g>
+    </g>
+    <rect x="619" y="144" width="490" height="693" rx="2" fill="none" stroke="#D9DDE3" stroke-width="1"/>
+
+    <!-- 浮动缩放条 -->
+    <rect x="696" y="844" width="336" height="36" rx="18" fill="#FFFFFF" stroke="#E3E6EB" filter="url(#barShadow)"/>
+    <use href="#i-minus" x="708" y="854" width="16" height="16" color="#4B5563" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <text x="740" y="867" font-size="11.5" font-weight="500" fill="#3F4652">62%</text>
+    <use href="#i-chevron-down" x="764" y="854" width="14" height="14" color="#8A93A3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <use href="#i-plus" x="786" y="854" width="16" height="16" color="#4B5563" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M816 850v24" stroke="#E7E9ED"/>
+    <use href="#i-fit-width" x="828" y="854" width="16" height="16" color="#4B5563" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="856" y="848" width="28" height="28" rx="7" fill="#EDF2FE"/>
+    <use href="#i-fit-page" x="862" y="854" width="16" height="16" color="#2F6FEB" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="886" y="848" width="28" height="28" rx="7" fill="#EDF2FE"/>
+    <use href="#i-rows" x="892" y="852" width="16" height="16" color="#2F6FEB" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M918 850v24" stroke="#E7E9ED"/>
+    <use href="#i-rotate" x="930" y="854" width="16" height="16" color="#4B5563" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M962 850v24" stroke="#E7E9ED"/>
+    <use href="#i-grid" x="976" y="854" width="16" height="16" color="#4B5563" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- ============ 状态栏 ============ -->
+    <rect x="24" y="896" width="1440" height="28" fill="#FBFBFC"/>
+    <path d="M24 896h1440" stroke="#E9EBEF"/>
+
+    <text x="44" y="914" font-size="10.5" fill="#5B6472">第 1 页，共 6 页</text>
+    <path d="M132 902v16" stroke="#E7E9ED"/>
+    <text x="146" y="914" font-size="10.5" fill="#98A1AF">A4 · 210 × 297 mm</text>
+
+    <text x="1328" y="914" font-size="10.5" fill="#98A1AF" text-anchor="end">62%</text>
+    <text x="1382" y="914" font-size="10.5" fill="#98A1AF" text-anchor="end">OFD 1.0</text>
+    <use href="#i-shield" x="1390" y="905" width="14" height="14" color="#98A1AF" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1440" y="914" font-size="10.5" fill="#98A1AF" text-anchor="end">未签名</text>
+
+    <rect x="24" y="24" width="1440" height="900" rx="14" fill="none" stroke="#DDE1E7" stroke-width="1"/>
+  </g>
+</svg>
