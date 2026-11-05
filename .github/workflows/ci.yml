@@ -117,3 +117,80 @@ jobs:
           name: vofdreader-archlinux-x86_64
           path: /build/*.pkg.tar.zst
           if-no-files-found: error
+
+  # Publishes the package as the rolling "nightly" pre-release of main: the
+  # `nightly` tag moves to the built commit and the assets are replaced.
+  # New assets are uploaded before stale ones are deleted, so the release
+  # always has a downloadable package.
+  nightly:
+    name: Publish nightly release
+    needs: archlinux
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vofdreader-archlinux-x86_64
+          path: dist
+
+      - name: Prepare assets
+        run: |
+          set -euo pipefail
+          cd dist
+          # Debug symbol packages stay in the workflow artifact only.
+          rm -f -- *-debug-*.pkg.tar.zst
+          ls *.pkg.tar.zst > /dev/null
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          ls -l
+
+      - name: Move the nightly tag
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GH_REPO/git/ref/tags/nightly" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" \
+              -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" \
+              -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" > /dev/null
+          fi
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          pkg=$(ls dist/*.pkg.tar.zst | head -n 1)
+          name=$(basename "$pkg")
+          notes=$(cat <<NOTES
+          Automatic build of \`main\` at ${GITHUB_SHA::7} ($(date -u +%Y-%m-%d)).
+          Untested pre-release; it is replaced by every push to main.
+
+          Install on Arch Linux:
+
+          \`\`\`sh
+          curl -LO https://github.com/$GH_REPO/releases/download/nightly/$name
+          curl -LO https://github.com/$GH_REPO/releases/download/nightly/SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          sudo pacman -U $name
+          \`\`\`
+          NOTES
+          )
+          if gh release view nightly > /dev/null 2>&1; then
+            gh release edit nightly --prerelease --title "Nightly" --notes "$notes"
+          else
+            gh release create nightly --verify-tag --prerelease --title "Nightly" --notes "$notes"
+          fi
+          gh release upload nightly dist/* --clobber
+          # Drop packages of earlier commits (their names carry the version).
+          keep=$(cd dist && ls)
+          gh release view nightly --json assets -q '.assets[].name' | while read -r asset; do
+            if ! grep -qxF -- "$asset" <<< "$keep"; then
+              gh release delete-asset nightly "$asset" -y
+            fi
+          done

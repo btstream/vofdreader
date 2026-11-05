@@ -22,6 +22,16 @@ PKGBUILD 设置 `options=('!lto')`。Arch 默认的 `lto` 选项会给 `CFLAGS` 
 
 `.github/workflows/ci.yml` 中的 `archlinux` 任务在 `archlinux:base-devel` 容器内用本 PKGBUILD 构建软件包。它只在推送到 `main` 或手动触发（workflow_dispatch）时运行，并且要等 `test` 任务通过。任务会把 `source` 改为当前检出的提交，所以构建的就是本次 CI 所测的代码；工作区测试已在 `test` 任务中执行，这里使用 `--nocheck`。生成的 `.pkg.tar.zst` 作为构件 `vofdreader-archlinux-x86_64` 上传，可在 Actions 运行页面下载，用 `sudo pacman -U` 安装。
 
+`main` 分支打包成功后，`nightly` 任务把软件包发布到 GitHub 的滚动预发布版本 **Nightly**（tag `nightly`）：tag 移到本次构建的提交，附件替换为新的 `.pkg.tar.zst` 与 `SHA256SUMS`（先上传新文件再删除旧文件，下载链接不会中断；调试符号包不发布）。其他分支的手动触发只生成 Actions 构件，不发布。该任务需要 `contents: write` 权限，已在 workflow 中为它单独声明。
+
+```sh
+# 文件名随版本变化，请在 Releases 页面的 Nightly 中查看
+curl -LO https://github.com/btstream/vofdreader/releases/download/nightly/SHA256SUMS
+curl -LO https://github.com/btstream/vofdreader/releases/download/nightly/<包文件名>
+sha256sum -c --ignore-missing SHA256SUMS
+sudo pacman -U <包文件名>
+```
+
 ## 安装内容
 
 - `/usr/bin/ofd-app`：桌面阅读器。
