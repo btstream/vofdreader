@@ -27,21 +27,21 @@
 
 ### 亮色主界面
 
-[![亮色主界面](docs/prototype/preview/01-main-light.png)](docs/prototype/01-main-light.svg)
+[![亮色主界面](docs/screenshots/main-light.png)](docs/screenshots/main-light.png)
 
-### 暗色搜索
+### 暗色主界面
 
-[![暗色搜索](docs/prototype/preview/02-search-dark.png)](docs/prototype/02-search-dark.svg)
+[![暗色主界面](docs/screenshots/main-dark.png)](docs/screenshots/main-dark.png)
 
 ### 设置 · 阅读
 
-[![设置阅读页](docs/prototype/preview/03-settings-light.png)](docs/prototype/03-settings-light.svg)
+[![设置阅读页](docs/screenshots/settings-light.png)](docs/screenshots/settings-light.png)
 
 ### 设置 · 性能
 
-[![设置性能页](docs/prototype/preview/04-settings-performance-dark.png)](docs/prototype/04-settings-performance-dark.svg)
+[![设置性能页](docs/screenshots/settings-performance-dark.png)](docs/screenshots/settings-performance-dark.png)
 
-> SVG 为可缩放矢量稿；点击图片或直接打开 `docs/prototype/*.svg` 查看。原型按未签名样本展示“未签名”状态。
+> 以上为实际运行截图。
 
 ## 构建与运行
 
@@ -79,7 +79,7 @@ cargo run -p ofd-app -- resources/y.ofd
 
 ### 设置
 
-设置窗口分为通用、外观、阅读、性能、文件与缓存、关于六类。可调整主题、侧栏默认状态、默认视图、页面间距、恢复阅读位置、浮动工具栏、点阵/阴影、搜索滚动、渲染质量与 DPI 上限、缓存/预取、导出格式与 PNG DPI，并可清理最近文件和缩略图缓存。
+设置窗口分为通用、外观、阅读、性能、文件与缓存、关于六类。可调整主题、侧栏默认状态、默认视图、页面间距、恢复阅读位置、浮动工具栏、点阵/阴影、搜索滚动、渲染质量与 DPI 上限、缓存/预取、渲染线程数、导出格式与 PNG DPI，并可清理最近文件和内存缩略图。
 
 Linux 的界面字体通过系统 `fc-match` 获取 fontconfig 默认 sans 字体，并读取一个中文 sans 回退字体；macOS / Windows 使用 GPUI 默认系统界面字体。OFD 内嵌字体仍按文档自身资源渲染。
 
