@@ -1,6 +1,6 @@
 use super::pointer_moved;
 use super::{Bounds, near_floating_bar, size};
-use super::{point, px};
+use super::{ScrollDelta, point, px, wheel_zoom_factor};
 
 #[test]
 fn only_bottom_center_of_reading_area_reveals_toolbar() {
@@ -69,4 +69,20 @@ fn three_pixel_movement_counts_as_activity() {
         point(px(10.0), px(10.0)),
         point(px(12.5), px(12.5))
     ));
+}
+
+#[test]
+fn wheel_zoom_follows_the_wheel_direction_and_is_capped() {
+    let notch = wheel_zoom_factor(ScrollDelta::Lines(point(0.0, 1.0)));
+    assert!((notch - 1.1).abs() < 0.001, "wheel up zooms in");
+    assert!(wheel_zoom_factor(ScrollDelta::Lines(point(0.0, -1.0))) < 1.0);
+
+    let flick = wheel_zoom_factor(ScrollDelta::Lines(point(0.0, 100.0)));
+    assert!((flick - 1.25).abs() < 0.001, "fast flicks are capped");
+
+    let pixel_notch = wheel_zoom_factor(ScrollDelta::Pixels(point(px(0.0), px(40.0))));
+    assert!(
+        (pixel_notch - 1.1).abs() < 0.001,
+        "precise deltas use pixels"
+    );
 }

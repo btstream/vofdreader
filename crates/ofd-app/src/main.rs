@@ -1338,17 +1338,33 @@ impl ReaderApp {
         }
     }
 
-    fn on_continuous_scroll(&mut self, _: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_continuous_scroll(
+        &mut self,
+        event: &ScrollEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if (event.modifiers.control || event.modifiers.platform) && self.page_count > 0 {
+            self.note_continuous_scroll(cx);
+            self.set_zoom(self.zoom * wheel_zoom_factor(event.delta), cx);
+            return;
+        }
         self.note_continuous_scroll(cx);
         self.sync_continuous_page(self.viewport, cx);
         cx.notify();
     }
 
-    /// Single-page mode has no scrollable content, so map mouse-wheel notches
-    /// to page changes. Continuous mode receives the event from its own
-    /// scroll container and never reaches this fallback.
+    /// Single-page mode has no scrollable content, so map plain mouse-wheel
+    /// notches to page changes and Ctrl/Cmd+wheel to zoom. Continuous mode
+    /// receives the event from its own scroll container and never reaches this
+    /// fallback.
     fn on_single_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.view_mode != ViewMode::Single || self.page_count == 0 || self.grid_open {
+            return;
+        }
+        if event.modifiers.control || event.modifiers.platform {
+            self.note_continuous_scroll(cx);
+            self.set_zoom(self.zoom * wheel_zoom_factor(event.delta), cx);
             return;
         }
         let lines = match event.delta {
@@ -4267,6 +4283,18 @@ fn pointer_moved(last: Point<Pixels>, current: Point<Pixels>) -> bool {
     let dx = f32::from(current.x - last.x);
     let dy = f32::from(current.y - last.y);
     dx * dx + dy * dy >= 9.0
+}
+
+/// Maps a mouse-wheel event to a multiplicative zoom step. Positive deltas
+/// (wheel up) zoom in; one notch is about ten percent and a fast flick is
+/// capped so a single event cannot jump across the whole zoom range.
+fn wheel_zoom_factor(delta: ScrollDelta) -> f32 {
+    let lines = match delta {
+        ScrollDelta::Lines(delta) => delta.y,
+        // Precise touchpad deltas are pixels; 40 px approximates one wheel line.
+        ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
+    };
+    (1.0 + lines * 0.1).clamp(0.75, 1.25)
 }
 
 fn content_corners(decorations: Decorations, fullscreen: bool) -> Corners<Pixels> {
