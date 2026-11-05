@@ -117,8 +117,43 @@ pub fn budgeted_dpi(ideal: u32, page: SizeMm, count: usize, budget: usize, max_d
     ideal.min(cap.clamp(96.0, max_dpi.max(96) as f64) as u32)
 }
 
-pub fn render_ready(scrolling: bool, in_flight: usize) -> bool {
-    !scrolling && in_flight == 0
+/// Whole-page bitmap density: `wanted` (preset × zoom), never above the
+/// preset (zoomed detail comes from tiles), within the 8192 px GPU texture
+/// side and the page cache shared by `visible` pages.
+pub fn page_dpi(wanted: u32, preset: u32, page: SizeMm, visible: usize, budget: usize) -> u32 {
+    let longest = page.width.max(page.height).max(1.0);
+    let texture = (((8192.0 * 25.4 / longest) / 24.0).floor() * 24.0).max(96.0) as u32;
+    budgeted_dpi(
+        wanted.min(preset).min(texture),
+        page,
+        visible,
+        budget,
+        crate::tiles::MAX_DPI,
+    )
+}
+
+/// How many leading prefetch candidates (in priority order, by resident
+/// bytes) fit into the cache room left after the on-screen pages. Stops at
+/// the first one that does not fit so lower priority pages never displace
+/// higher ones; together with on-screen pages this never exceeds the cache,
+/// so finished prefetches cannot evict each other in a loop.
+pub fn prefetch_fit(bytes: impl IntoIterator<Item = usize>, room: usize, slots: usize) -> usize {
+    let mut left = room;
+    bytes
+        .into_iter()
+        .take(slots)
+        .take_while(|bytes| {
+            let fits = *bytes <= left;
+            left = left.saturating_sub(*bytes);
+            fits
+        })
+        .count()
+}
+
+/// A raster job may start while scrolling as long as a worker slot is free;
+/// pages entering the view must already be at the chosen quality.
+pub fn render_ready(in_flight: usize, slots: usize) -> bool {
+    in_flight < slots.max(1)
 }
 
 pub fn prefetch_range(visible: Range<usize>, total: usize, radius: usize) -> Range<usize> {
@@ -275,20 +310,51 @@ mod tests {
     }
 
     #[test]
-    fn wheel_burst_does_not_queue_raster_jobs() {
+    fn page_density_follows_the_preset_not_the_screen() {
+        let a4 = SizeMm::new(210.0, 297.0);
+        let budget = 384 * 1024 * 1024;
+        // 100%: exactly the preset, for visible pages and prefetch alike.
+        assert_eq!(page_dpi(192, 192, a4, 3, budget), 192);
+        assert_eq!(page_dpi(384, 384, a4, 3, budget), 384);
+        // Zoomed in: the page bitmap stays at the preset, tiles add detail.
+        assert_eq!(page_dpi(288, 192, a4, 3, budget), 192);
+        // Zoomed out: lower density is enough.
+        assert_eq!(page_dpi(96, 192, a4, 3, budget), 96);
+        // A0 at 384 DPI would exceed the 8192 px texture side.
+        let a0 = SizeMm::new(841.0, 1189.0);
+        let dpi = page_dpi(384, 384, a0, 1, usize::MAX / 4);
+        assert!(f64::from(dpi) * 1189.0 / 25.4 <= 8192.0, "{dpi}");
+        // A small cache lowers density rather than overflowing.
+        assert!(page_dpi(384, 384, a4, 3, 64 * 1024 * 1024) < 384);
+    }
+
+    #[test]
+    fn prefetch_never_exceeds_the_room_left_by_visible_pages() {
+        const MIB: usize = 1024 * 1024;
+        let a4_192 = 15 * MIB;
+        // Smallest cache: 48 MiB of pages, two A4 pages on screen.
+        let room = (48 * MIB).saturating_sub(2 * a4_192);
+        assert_eq!(prefetch_fit([a4_192; 8], room, 30), 1);
+        // On-screen pages already fill the cache: nothing is prefetched.
+        assert_eq!(prefetch_fit([a4_192; 8], 0, 30), 0);
+        // The count limit applies as well.
+        assert_eq!(prefetch_fit([MIB; 8], 512 * MIB, 3), 3);
+        // A page that does not fit stops the list; a smaller, lower priority
+        // page behind it is not taken in its place.
+        assert_eq!(prefetch_fit([MIB, 40 * MIB, MIB], 10 * MIB, 30), 1);
+    }
+
+    #[test]
+    fn wheel_burst_admits_at_most_one_job_per_slot() {
         let mut jobs = 0;
         for _ in 0..1000 {
-            if render_ready(true, jobs) {
+            if render_ready(jobs, 4) {
                 jobs += 1;
             }
         }
-        assert_eq!(jobs, 0);
-        for _ in 0..1000 {
-            if render_ready(false, jobs) {
-                jobs += 1;
-            }
-        }
-        assert_eq!(jobs, 1, "idle admits one job, not an entire scroll backlog");
+        assert_eq!(jobs, 4, "a scroll burst fills the slots, not a backlog");
+        assert!(render_ready(0, 0), "a zero slot count still admits one job");
+        assert!(!render_ready(1, 0));
     }
 
     #[test]

@@ -59,9 +59,6 @@ impl CacheConfig {
 
     // Separate active rendering quality from retention capacity: increasing
     // cache space should save history, not generate higher-density bitmaps.
-    pub fn page_working_bytes(self) -> usize {
-        self.page_bytes().min(96 * MIB)
-    }
     pub fn tile_working_bytes(self) -> usize {
         self.tile_bytes().min(32 * MIB)
     }
@@ -94,7 +91,6 @@ mod tests {
         let new = CacheConfig::default();
         assert_eq!(new.page_bytes(), 192 * MIB);
         assert_eq!(new.tile_bytes(), 64 * MIB);
-        assert_eq!(new.page_working_bytes(), old.page_working_bytes());
         assert_eq!(new.tile_working_bytes(), old.tile_working_bytes());
         assert_eq!(new.page_limit(), 32);
         // A4 96-DPI previews (~3.4 MiB) used to hit the 8-page count limit
@@ -113,7 +109,6 @@ mod tests {
             );
             assert!((4..=256).contains(&config.page_limit()));
             assert!((1..=64).contains(&config.parsed_page_limit()));
-            assert!(config.page_working_bytes() <= config.page_bytes());
             assert!(config.tile_working_bytes() <= config.tile_bytes());
         }
     }

@@ -149,6 +149,9 @@ struct ReaderApp {
     continuous_layout: RefCell<continuous::LayoutCache>,
     page_sizes_revision: u64,
     continuous_last_scroll: Option<Instant>,
+    /// Last continuous scroll offset and direction; prefetch goes ahead.
+    last_scroll_y: f32,
+    scroll_down: bool,
     continuous_settle_pending: bool,
     page_cache: HashMap<(usize, u32), Arc<RenderImage>>,
     font_reports: HashMap<usize, Arc<ofd_core::FontRenderReport>>,
@@ -242,10 +245,6 @@ impl ReaderApp {
 
     fn max_page_dpi(&self) -> u32 {
         self.settings.performance.page_dpi_cap()
-    }
-
-    fn max_tile_dpi(&self) -> u32 {
-        self.settings.performance.tile_dpi_cap()
     }
 
     fn new(
@@ -396,6 +395,8 @@ impl ReaderApp {
             continuous_layout: RefCell::new(continuous::LayoutCache::default()),
             page_sizes_revision: 0,
             continuous_last_scroll: None,
+            last_scroll_y: 0.0,
+            scroll_down: true,
             continuous_settle_pending: false,
             page_cache: HashMap::new(),
             font_reports: HashMap::new(),
@@ -652,35 +653,40 @@ impl ReaderApp {
         }
     }
 
-    /// Target rasterization DPI for the current window scale, zoom and fit.
-    ///
-    /// The page is displayed at `fit * zoom` logical pixels per 96-DPI unit and
-    /// then multiplied by the window scale factor, so the bitmap must be
-    /// rasterized at that same device density to stay crisp. Quantizing to
-    /// 24 DPI buckets avoids re-rendering on every pixel of window resize.
+    /// Whole-page DPI for the single-page view: the quality preset at the
+    /// current zoom (see `base_dpi`). Screen resolution is not considered.
     fn target_dpi(&self) -> u32 {
-        let display_scale = self.fit_scale(self.viewport) * self.zoom;
-        let needed = 96.0 * self.window_scale * display_scale;
-        let quantized = (needed / 24.0).ceil() * 24.0;
-        // A custom DPI cap must still respect the page-cache budget: one A4
-        // page at 768 DPI would be over 200 MiB.
-        let page = self
+        self.base_dpi(self.page, 1)
+    }
+
+    /// Quality preset DPI at 100% zoom (质量档位).
+    fn preset_dpi(&self) -> u32 {
+        self.max_page_dpi().max(96)
+    }
+
+    /// Density the page content should have at the current zoom.
+    fn wanted_dpi(&self) -> u32 {
+        tiles::hard_dpi(self.preset_dpi(), self.zoom)
+    }
+
+    /// Whole-page bitmap density: the wanted density, but never above the
+    /// preset (zoomed-in detail comes from tiles) and within the GPU texture
+    /// size and the page cache shared by `visible` pages. Visible pages and
+    /// prefetched neighbours use the same value, so a page that scrolls into
+    /// view is already at its final quality.
+    fn base_dpi(&self, page: usize, visible: usize) -> u32 {
+        let size = self
             .page_sizes
-            .get(self.page)
+            .get(page)
             .copied()
             .unwrap_or(SizeMm::new(210.0, 297.0));
-        let dpi = continuous::budgeted_dpi(
-            quantized.clamp(96.0, self.max_page_dpi().max(96) as f32) as u32,
-            page,
-            1,
-            self.cache_config.page_working_bytes(),
-            self.max_page_dpi(),
-        );
-        if self.tile_density(self.page).is_some() {
-            dpi.min(96)
-        } else {
-            dpi
-        }
+        continuous::page_dpi(
+            self.wanted_dpi(),
+            self.preset_dpi(),
+            size,
+            visible,
+            self.cache_config.page_bytes(),
+        )
     }
 
     /// Upgrades the bitmap only after the zoom/resize has settled, and only
@@ -893,6 +899,18 @@ impl ReaderApp {
         Some((sharper, image))
     }
 
+    /// Bytes of the cached page bitmaps whose key matches.
+    fn cached_page_bytes(&self, matches: impl Fn((usize, u32)) -> bool) -> usize {
+        self.page_cache
+            .iter()
+            .filter(|(key, _)| matches(**key))
+            .map(|(_, image)| {
+                let size = image.size(0);
+                size.width.to_bytes(4) as usize * size.height.0 as usize
+            })
+            .sum()
+    }
+
     fn touch_cached_page(&mut self, page: usize, dpi: u32) {
         let key = (page, dpi);
         self.page_cache_order.retain(|existing| *existing != key);
@@ -931,6 +949,13 @@ impl ReaderApp {
         self.touch_cached_page(page, dpi);
 
         let protected = (self.page, self.image_dpi);
+        // Pages on screen are never evicted, even when they alone exceed the
+        // budget; otherwise two large visible pages evict each other forever.
+        let on_screen = if self.view_mode == ViewMode::Continuous {
+            self.continuous_content_range(self.viewport)
+        } else {
+            0..0
+        };
         let count_limit = if self.view_mode == ViewMode::Continuous {
             self.cache_config
                 .page_limit()
@@ -945,14 +970,13 @@ impl ReaderApp {
             let Some(oldest) = self.page_cache_order.pop_front() else {
                 break;
             };
-            if oldest == key || oldest == protected {
+            let keep = |entry: &(usize, u32)| {
+                *entry == key || *entry == protected || on_screen.contains(&entry.0)
+            };
+            if keep(&oldest) {
                 self.page_cache_order.push_back(oldest);
                 // Only protected entries are left; stop instead of spinning.
-                if self
-                    .page_cache_order
-                    .iter()
-                    .all(|entry| *entry == protected || *entry == key)
-                {
+                if self.page_cache_order.iter().all(keep) {
                     break;
                 }
                 continue;
@@ -1115,40 +1139,19 @@ impl ReaderApp {
         })
     }
 
+    /// How many pages of this size can be on screen at once. Unlike the
+    /// current visible range it does not change while scrolling, so a tight
+    /// cache budget does not make the density (and cache key) flip.
+    fn continuous_page_slots(&self, viewport: Size<Pixels>, page: usize) -> usize {
+        let height = (f32::from(viewport.height) - 124.0).max(240.0);
+        let page_height = self.continuous_page_size(viewport, page).1.max(1.0);
+        ((height / page_height).ceil() as usize + 1).clamp(1, self.page_count.max(1))
+    }
+
     fn continuous_dpi(&self, viewport: Size<Pixels>, page: usize) -> u32 {
-        let scale = self.continuous_page_scale(viewport, page);
-        let needed = 96.0 * self.window_scale * scale;
-        let ideal =
-            ((needed / 24.0).ceil() * 24.0).clamp(96.0, self.max_page_dpi().max(96) as f32) as u32;
-        let ideal = if self.tile_density(page).is_some() {
-            ideal.min(96)
-        } else {
-            ideal
-        };
-        let actual = self.continuous_content_range(viewport);
-        let (ideal, count, budget) = if actual.contains(&page) {
-            (ideal, actual.len(), self.cache_config.page_working_bytes())
-        } else {
-            // Offscreen prefetch gets only the remaining quarter of memory;
-            // do not sacrifice visible-page sharpness for full-DPI neighbors.
-            (
-                ideal.min(96),
-                self.continuous_visible_range(viewport)
-                    .len()
-                    .saturating_sub(actual.len()),
-                self.cache_config.page_working_bytes() / 3,
-            )
-        };
-        continuous::budgeted_dpi(
-            ideal,
-            self.page_sizes
-                .get(page)
-                .copied()
-                .unwrap_or(SizeMm::new(210.0, 297.0)),
-            count,
-            budget,
-            self.max_page_dpi(),
-        )
+        // Same density on and off screen: prefetched neighbours must not be
+        // a blurrier stand-in that is refined after scrolling stops.
+        self.base_dpi(page, self.continuous_page_slots(viewport, page))
     }
 
     fn request_continuous_page(
@@ -1163,8 +1166,7 @@ impl ReaderApp {
 
     fn request_cached_page(&mut self, page: usize, dpi: u32, cx: &mut Context<Self>) {
         if page >= self.page_count
-            || !continuous::render_ready(self.continuous_scrolling(), self.continuous_pending.len())
-            || self.tile_busy()
+            || !continuous::render_ready(self.raster_jobs(), self.tile_slots)
             || self.latest_render.is_some()
         {
             return;
@@ -1243,9 +1245,7 @@ impl ReaderApp {
     }
 
     fn ensure_continuous_pages(&mut self, viewport: Size<Pixels>, cx: &mut Context<Self>) {
-        if self.grid_open
-            || !continuous::render_ready(self.continuous_scrolling(), self.continuous_pending.len())
-        {
+        if self.grid_open || !continuous::render_ready(self.raster_jobs(), self.tile_slots) {
             return;
         }
         // Only visible previews here. Speculative pages wait until tile plans
@@ -1261,10 +1261,16 @@ impl ReaderApp {
         });
         for page in pages {
             self.request_continuous_page(viewport, page, cx);
-            if !self.continuous_pending.is_empty() || self.tile_busy() {
+            if !continuous::render_ready(self.raster_jobs(), self.tile_slots) {
                 break;
             }
         }
+    }
+
+    /// Page and tile raster jobs in flight; together they share the
+    /// configured render thread slots.
+    fn raster_jobs(&self) -> usize {
+        self.continuous_pending.len() + self.tile_jobs.len()
     }
 
     fn continuous_scrolling(&self) -> bool {
@@ -1324,6 +1330,10 @@ impl ReaderApp {
 
     fn sync_continuous_page(&mut self, viewport: Size<Pixels>, cx: &mut Context<Self>) {
         let scroll = -f32::from(self.continuous_scroll.offset().y);
+        if scroll != self.last_scroll_y {
+            self.scroll_down = scroll > self.last_scroll_y;
+            self.last_scroll_y = scroll;
+        }
         let page = self.continuous_page_at(viewport, scroll);
         if page != self.page {
             self.page = page;
@@ -3141,22 +3151,29 @@ impl ReaderApp {
         // An old document's tasks keep their slots until they return.
     }
 
+    /// Tiles carry the zoomed-in detail above the whole-page bitmap: they
+    /// exist only when the wanted density exceeds the page's base density.
     fn tile_density(&self, page: usize) -> Option<u32> {
-        let size = self.page_sizes.get(page)?;
-        let scale = if self.view_mode == ViewMode::Continuous {
-            self.continuous_page_scale(self.viewport, page)
+        if page >= self.page_sizes.len() {
+            return None;
+        }
+        let (scale, visible) = if self.view_mode == ViewMode::Continuous {
+            (
+                self.continuous_page_scale(self.viewport, page),
+                self.continuous_page_slots(self.viewport, page),
+            )
         } else {
-            self.fit_scale(self.viewport) * self.zoom
+            (self.fit_scale(self.viewport) * self.zoom, 1)
         };
-        // Fit the visible device-pixel working set (plus boundary tiles) into
-        // its reservation even on very large/HiDPI windows.
+        let base = self.base_dpi(page, visible);
+        // Keep the visible tile working set (viewport area in page pixels at
+        // the tile density) inside its reservation.
         let area =
             f32::from(self.viewport.width).max(1.0) * f32::from(self.viewport.height).max(1.0);
-        let device_scale = self
-            .window_scale
-            .min((self.cache_config.tile_working_bytes() as f32 / (area * 8.0)).sqrt());
-        let dpi = tiles::density(scale, device_scale, self.max_tile_dpi());
-        tiles::enabled(size.width, size.height, dpi).then_some(dpi)
+        let fit = (self.cache_config.tile_working_bytes() as f32 / (area * 8.0)).sqrt();
+        let budget = ((96.0 * scale * fit / 24.0).floor() * 24.0).max(96.0) as u32;
+        let dpi = self.wanted_dpi().min(budget);
+        (dpi > base).then_some(dpi)
     }
 
     fn nearby_page_range(&self) -> std::ops::Range<usize> {
@@ -3171,13 +3188,14 @@ impl ReaderApp {
     }
 
     fn schedule_nearby(&mut self, cx: &mut Context<Self>) {
+        // Continuous scrolling keeps prefetching so pages are ready before
+        // they appear; single-page wheel bursts still coalesce.
         if self.doc.is_none()
             || self.renderer.is_none()
             || self.grid_open
-            || self.continuous_scrolling()
+            || (self.view_mode == ViewMode::Single && self.continuous_scrolling())
             || self.dpi_pending
             || self.latest_render.is_some()
-            || !self.continuous_pending.is_empty()
             || self.loading
         {
             return;
@@ -3197,22 +3215,60 @@ impl ReaderApp {
             .nearby_page_range()
             .filter(|page| !actual.contains(page))
             .collect();
-        pages.sort_by_key(|page| (page.abs_diff(self.page), *page < self.page));
-        pages.truncate(self.cache_config.page_limit().saturating_sub(actual.len()));
-        let count = pages.len().max(1);
-        let budget = self.cache_config.page_bytes() / 3;
-        for page in pages {
-            let size = self.page_sizes[page];
-            let dpi = continuous::budgeted_dpi(96, size, count, budget, self.max_page_dpi());
-            let bytes = (size.width * dpi as f64 / 25.4).ceil()
-                * (size.height * dpi as f64 / 25.4).ceil()
-                * 4.0;
-            // Extremely large pages can exceed the budget even at minimum DPI.
-            if bytes > (budget / count) as f64 {
-                continue;
+        // Pages ahead in the scroll direction first; a page behind counts as
+        // twice as far, it was usually just on screen and is still cached.
+        let down = self.scroll_down;
+        pages.sort_by_key(|page| {
+            let ahead = (*page > self.page) == down;
+            (page.abs_diff(self.page) * if ahead { 1 } else { 2 }, !ahead)
+        });
+        // Neighbours use the visible pages' density; when memory is short,
+        // fewer pages are prefetched instead of blurrier ones. Only the space
+        // left after the on-screen pages counts: prefetching more than the
+        // cache holds evicts one neighbour per finished neighbour, forever.
+        let dpi_of = |this: &Self, page: usize| {
+            if this.view_mode == ViewMode::Continuous {
+                this.continuous_dpi(this.viewport, page)
+            } else {
+                this.base_dpi(page, 1)
             }
+        };
+        // On-screen pages keep every cached density (they are never evicted).
+        let reserved: usize = actual
+            .clone()
+            .map(|page| {
+                let cached = self.cached_page_bytes(|(cached, _)| cached == page);
+                if cached > 0 {
+                    cached
+                } else {
+                    page_raster_bytes(self.page_sizes[page], dpi_of(self, page))
+                }
+            })
+            .sum();
+        let room = self.cache_config.page_bytes().saturating_sub(reserved);
+        let slots = self.cache_config.page_limit().saturating_sub(actual.len());
+        let sizes: Vec<_> = pages
+            .iter()
+            .map(|&page| {
+                let dpi = dpi_of(self, page);
+                // A sharper cached bitmap is what stays resident.
+                let sharpest = self
+                    .page_cache
+                    .keys()
+                    .filter(|(cached, cached_dpi)| *cached == page && *cached_dpi >= dpi)
+                    .map(|(_, cached_dpi)| *cached_dpi)
+                    .min();
+                let bytes = match sharpest {
+                    Some(found) => self.cached_page_bytes(|key| key == (page, found)),
+                    None => page_raster_bytes(self.page_sizes[page], dpi),
+                };
+                (page, dpi, bytes)
+            })
+            .collect();
+        let fit = continuous::prefetch_fit(sizes.iter().map(|(_, _, bytes)| *bytes), room, slots);
+        for &(page, dpi, _) in &sizes[..fit] {
             self.request_cached_page(page, dpi, cx);
-            if !self.continuous_pending.is_empty() {
+            if !continuous::render_ready(self.raster_jobs(), self.tile_slots) {
                 return;
             }
         }
@@ -3239,7 +3295,7 @@ impl ReaderApp {
     /// Start tile jobs in priority order until every slot is used. Tiles of
     /// one page share the renderer's prepared page, so they run in parallel.
     fn schedule_tile(&mut self, include_prefetch: bool, cx: &mut Context<Self>) {
-        while self.tile_jobs.len() < self.tile_slots {
+        while continuous::render_ready(self.raster_jobs(), self.tile_slots) {
             if !self.start_tile(include_prefetch, cx) {
                 break;
             }
@@ -3248,10 +3304,11 @@ impl ReaderApp {
 
     /// Start the most important missing tile; false when nothing started.
     fn start_tile(&mut self, include_prefetch: bool, cx: &mut Context<Self>) -> bool {
-        if self.continuous_scrolling()
+        // Continuous scrolling keeps rendering visible tiles; page and tile
+        // jobs share the render slots (see `raster_jobs`).
+        if (self.view_mode == ViewMode::Single && self.continuous_scrolling())
             || self.dpi_pending
             || self.latest_render.is_some()
-            || !self.continuous_pending.is_empty()
         {
             return false;
         }
@@ -4277,6 +4334,14 @@ fn near_floating_bar(bounds: Bounds<Pixels>, pointer: Point<Pixels>) -> bool {
         && x <= width * 0.5 + half_width
         && y >= (height - 88.0).max(0.0)
         && y <= height
+}
+
+/// RGBA bytes of a whole-page bitmap at `dpi`, rounded up by one pixel per
+/// side: an underestimate would let prefetch overfill the cache by a few
+/// bytes and evict a neighbour on every insert.
+fn page_raster_bytes(size: SizeMm, dpi: u32) -> usize {
+    let side = |mm: f64| (mm * f64::from(dpi) / 25.4).ceil() as usize + 1;
+    side(size.width) * side(size.height) * 4
 }
 
 fn pointer_moved(last: Point<Pixels>, current: Point<Pixels>) -> bool {

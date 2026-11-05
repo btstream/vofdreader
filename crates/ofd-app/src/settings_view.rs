@@ -742,7 +742,6 @@ impl ReaderApp {
         };
         let custom = performance.quality == QualityChoice::Custom;
         let page_cap = performance.page_dpi_cap();
-        let tile_cap = performance.tile_dpi_cap();
         let cache_label = if performance.cache_mib >= 1024 {
             format!("{:.1} GiB", performance.cache_mib as f32 / 1024.0)
         } else {
@@ -790,7 +789,7 @@ impl ReaderApp {
             .flex_col()
             .child(self.page_heading(
                 "性能",
-                "调整渲染质量、缓存与预取策略；整页 DPI 仍受缓存预算约束，解析树缓存在下次打开文档时生效。",
+                "调整渲染质量、缓存与预取策略；页面 DPI 仍受缓存预算约束，解析树缓存在下次打开文档时生效。",
             ))
             .child(
                 self.settings_card()
@@ -871,7 +870,7 @@ impl ReaderApp {
             .child(self.section_title("渲染质量"))
             .child(self.setting_row(
                 "质量档位",
-                "自动档位随窗口缩放和阅读比例计算",
+                "页面按档位 DPI 渲染，与屏幕分辨率无关；放大时按比例提高",
                 self.segmented(
                     "performance-quality",
                     quality_index,
@@ -892,22 +891,12 @@ impl ReaderApp {
                     .items_center()
                     .gap(px(18.0))
                     .child(advanced_cell(
-                        "整页最高 DPI",
-                        "普通缩放下整页位图的上限",
+                        "页面 DPI",
+                        "100% 缩放时的渲染密度，滚动与预取都按此渲染",
                         page_cap,
                         SettingsAction::AdjustPageDpi(-24),
                         SettingsAction::AdjustPageDpi(24),
                         "performance-page-dpi",
-                        cx,
-                    ))
-                    .child(div().w(px(1.0)).h(px(38.0)).bg(rgb(p.border)))
-                    .child(advanced_cell(
-                        "分块最高 DPI",
-                        "放大查看时高清分块的上限",
-                        tile_cap,
-                        SettingsAction::AdjustTileDpi(-24),
-                        SettingsAction::AdjustTileDpi(24),
-                        "performance-tile-dpi",
                         cx,
                     )),
             )
@@ -1320,11 +1309,6 @@ impl ReaderApp {
             SettingsAction::AdjustPageDpi(delta) => {
                 let value = self.settings.performance.page_dpi_cap() as i32 + delta;
                 self.settings.performance.max_page_dpi = value.clamp(96, 768) as u32;
-                self.settings.performance.quality = QualityChoice::Custom;
-            }
-            SettingsAction::AdjustTileDpi(delta) => {
-                let value = self.settings.performance.tile_dpi_cap() as i32 + delta;
-                self.settings.performance.max_tile_dpi = value.clamp(96, 1536) as u32;
                 self.settings.performance.quality = QualityChoice::Custom;
             }
             SettingsAction::SetExportFormat(format) => {

@@ -135,12 +135,15 @@ fn resolve(setting: usize, cores: usize) -> usize {
     }
 }
 
-pub fn density(scale: f32, device_scale: f32, max_dpi: u32) -> u32 {
-    ((96.0 * scale * device_scale / 24.0).ceil() * 24.0).clamp(96.0, max_dpi.max(96) as f32) as u32
-}
+/// Safety ceiling for any raster density (zoomed tiles included).
+pub const MAX_DPI: u32 = 1536;
 
-pub fn enabled(width_mm: f64, height_mm: f64, dpi: u32) -> bool {
-    dpi > 192 || width_mm * height_mm * (dpi as f64 / 25.4).powi(2) > 4_000_000.0
+/// Hard density: the quality preset's page DPI scaled by the reader zoom,
+/// in 24 DPI buckets. Screen resolution and fit-to-width are deliberately
+/// not involved, so what is drawn matches the chosen quality everywhere.
+pub fn hard_dpi(preset: u32, zoom: f32) -> u32 {
+    let dpi = preset.max(96) as f32 * zoom.max(0.01);
+    ((dpi / 24.0).ceil() * 24.0).clamp(96.0, MAX_DPI as f32) as u32
 }
 
 /// Visible rectangle in page device pixels, including horizontal clipping.
@@ -275,7 +278,10 @@ mod tests {
             })
             .sum();
         assert_eq!(area, 1100 * 800);
-        assert_eq!(density(4.0, 2.0, 768), 768);
-        assert_eq!(density(4.0, 2.0, 384), 384);
+        assert_eq!(hard_dpi(192, 1.0), 192);
+        assert_eq!(hard_dpi(192, 1.5), 288);
+        assert_eq!(hard_dpi(192, 0.5), 96);
+        assert_eq!(hard_dpi(384, 1.1), 432);
+        assert_eq!(hard_dpi(384, 8.0), MAX_DPI);
     }
 }

@@ -122,23 +122,15 @@ impl Default for PerformanceSettings {
 }
 
 impl PerformanceSettings {
-    /// Effective caps, not the stored custom values. Presets stay independent
-    /// of the advanced values so switching back to Custom restores them.
+    /// Page DPI at 100% zoom for the chosen preset, not the stored custom
+    /// value. Presets stay independent of it so switching back to Custom
+    /// restores it. Zooming in scales this; tiles carry the extra detail.
     pub fn page_dpi_cap(&self) -> u32 {
         match self.quality {
             QualityChoice::Auto => 384,
             QualityChoice::Standard => 192,
             QualityChoice::High => 288,
             QualityChoice::Custom => self.max_page_dpi,
-        }
-    }
-
-    pub fn tile_dpi_cap(&self) -> u32 {
-        match self.quality {
-            QualityChoice::Auto => 768,
-            QualityChoice::Standard => 384,
-            QualityChoice::High => 576,
-            QualityChoice::Custom => self.max_tile_dpi,
         }
     }
 }
@@ -238,7 +230,6 @@ pub enum SettingsAction {
     AdjustTileRing(i32),
     AdjustRenderThreads(i32),
     AdjustPageDpi(i32),
-    AdjustTileDpi(i32),
     SetExportFormat(ExportFormat),
     AdjustExportDpi(i32),
     AdjustRecentLimit(i32),
@@ -415,24 +406,12 @@ mod tests {
             max_tile_dpi: 984,
             ..PerformanceSettings::default()
         };
-        assert_eq!(
-            (performance.page_dpi_cap(), performance.tile_dpi_cap()),
-            (432, 984)
-        );
+        assert_eq!(performance.page_dpi_cap(), 432);
         performance.quality = QualityChoice::Standard;
-        assert_eq!(
-            (performance.page_dpi_cap(), performance.tile_dpi_cap()),
-            (192, 384)
-        );
+        assert_eq!(performance.page_dpi_cap(), 192);
         performance.quality = QualityChoice::High;
-        assert_eq!(
-            (performance.page_dpi_cap(), performance.tile_dpi_cap()),
-            (288, 576)
-        );
+        assert_eq!(performance.page_dpi_cap(), 288);
         performance.quality = QualityChoice::Auto;
-        assert_eq!(
-            (performance.page_dpi_cap(), performance.tile_dpi_cap()),
-            (384, 768)
-        );
+        assert_eq!(performance.page_dpi_cap(), 384);
     }
 }
