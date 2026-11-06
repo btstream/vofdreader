@@ -186,7 +186,29 @@ jobs:
           else
             gh release create nightly --verify-tag --prerelease --title "Nightly" --notes "$notes"
           fi
-          gh release upload nightly dist/* --clobber
+          # A stream error while uploading can leave an incomplete "open"
+          # asset behind. --clobber only removes completed assets, so a retry
+          # then fails with "ReleaseAsset.name already exists" (HTTP 422).
+          # Delete the conflicting name and back off before retrying.
+          upload_asset() {
+            local file=$1 name
+            name=$(basename "$file")
+            for attempt in 1 2 3 4 5; do
+              if gh release upload nightly "$file" --clobber; then
+                return 0
+              fi
+              echo "Upload of $name failed (attempt $attempt); deleting leftovers" >&2
+              gh release delete-asset nightly "$name" -y > /dev/null 2>&1 || true
+              sleep $((attempt * 5))
+            done
+            echo "Could not upload $name after 5 attempts" >&2
+            return 1
+          }
+          # Upload one asset at a time so a failed file cannot leave its
+          # siblings' uploads half-done.
+          for file in dist/*; do
+            upload_asset "$file"
+          done
           # Drop packages of earlier commits (their names carry the version).
           keep=$(cd dist && ls)
           gh release view nightly --json assets -q '.assets[].name' | while read -r asset; do
