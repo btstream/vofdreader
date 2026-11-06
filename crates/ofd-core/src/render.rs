@@ -690,7 +690,7 @@ impl OfdDocument {
         }
         let list = self.display_list(index)?;
         let mut rects = Vec::new();
-        collect_text_matches(&list.items, query, &mut rects);
+        collect_text_matches(&list.items, query, Matrix::IDENTITY, &mut rects);
         Ok(rects)
     }
 
@@ -2031,7 +2031,7 @@ fn position_glyph_clusters(
     }
 }
 
-fn collect_text_matches(items: &[Item], query: &str, out: &mut Vec<TextMatchRect>) {
+fn collect_text_matches(items: &[Item], query: &str, parent: Matrix, out: &mut Vec<TextMatchRect>) {
     for item in items {
         match item {
             Item::Text {
@@ -2040,6 +2040,7 @@ fn collect_text_matches(items: &[Item], query: &str, out: &mut Vec<TextMatchRect
                 style,
                 ..
             } => {
+                let transform = parent.compose(*transform);
                 let text: String = chars.iter().map(|char| char.ch).collect();
                 let mut from = 0;
                 while let Some(offset) = text[from..].find(query) {
@@ -2050,16 +2051,17 @@ fn collect_text_matches(items: &[Item], query: &str, out: &mut Vec<TextMatchRect
                     if char_start < char_end
                         && char_end <= chars.len()
                         && let Some(rect) =
-                            text_run_rect(transform, chars, char_start, char_end, style.font_size)
+                            text_run_rect(&transform, chars, char_start, char_end, style.font_size)
                     {
                         out.push(rect);
                     }
                     from = end;
                 }
             }
-            Item::Group { items, .. } | Item::Clip { items, .. } => {
-                collect_text_matches(items, query, out)
-            }
+            Item::Group {
+                transform, items, ..
+            } => collect_text_matches(items, query, parent.compose(*transform), out),
+            Item::Clip { items, .. } => collect_text_matches(items, query, parent, out),
             _ => {}
         }
     }
@@ -3207,6 +3209,28 @@ mod tests {
                 clusters: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn search_rects_apply_group_transform() {
+        let group = Item::Group {
+            transform: Matrix {
+                a: 0.5,
+                b: 0.0,
+                c: 0.0,
+                d: 0.5,
+                e: 10.0,
+                f: 20.0,
+            },
+            items: vec![audit_text(vec![])],
+            opacity: 1.0,
+        };
+        let mut rects = Vec::new();
+        collect_text_matches(&[group], "A", Matrix::IDENTITY, &mut rects);
+        assert_eq!(rects.len(), 1);
+        assert!((rects[0].x - 11.0).abs() < 1e-9);
+        assert!((rects[0].y - 17.1).abs() < 1e-9);
+        assert!((rects[0].height - 5.0).abs() < 1e-9);
     }
 
     #[test]

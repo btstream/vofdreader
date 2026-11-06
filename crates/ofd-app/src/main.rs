@@ -51,6 +51,11 @@ struct Palette {
     accent_soft: u32,
     primary_hover: u32,
     primary_active: u32,
+    window_control_hover: u32,
+    window_control_active: u32,
+    window_close_hover: u32,
+    window_close_active: u32,
+    search_match: u32,
     warning: u32,
     error: u32,
     error_border: u32,
@@ -75,6 +80,11 @@ impl Palette {
         accent_soft: 0xEDF2FE,
         primary_hover: 0x2560D4,
         primary_active: 0x1F4FB5,
+        window_control_hover: 0xEDEFF2,
+        window_control_active: 0xE1E4E9,
+        window_close_hover: 0xE5484D,
+        window_close_active: 0xC93A3F,
+        search_match: 0xB45309,
         warning: 0xB45309,
         error: 0xB42318,
         error_border: 0xFCA5A5,
@@ -98,6 +108,11 @@ impl Palette {
         accent_soft: 0x202A3D,
         primary_hover: 0x4B85F5,
         primary_active: 0x2F63D8,
+        window_control_hover: 0x23262D,
+        window_control_active: 0x2C3038,
+        window_close_hover: 0xDC454B,
+        window_close_active: 0xB83439,
+        search_match: 0xFFD666,
         warning: 0xE0A64A,
         error: 0xFF7A7A,
         error_border: 0x7F3B3B,
@@ -119,6 +134,9 @@ const THUMB_DPI: f32 = 48.0;
 /// Hides the floating zoom bar after this much pointer inactivity.
 const BAR_HIDE_DELAY: Duration = Duration::from_millis(2500);
 const CONTINUOUS_IDLE: Duration = Duration::from_millis(160);
+/// Search matches on the page, and the one currently selected in the sidebar.
+const SEARCH_HIGHLIGHT: u32 = 0xFFD54A80;
+const SEARCH_ACTIVE_HIGHLIGHT: u32 = 0xFF8A3D99;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -129,14 +147,36 @@ enum ViewMode {
 #[derive(Clone)]
 struct SearchHit {
     page: usize,
+    /// Ordinal of this match within the page's `page_search_rects` list.
+    match_index: usize,
     snippet: String,
+}
+
+/// Lightweight state kept for inactive tabs. Rendering resources are rebuilt
+/// from this snapshot when the tab becomes active again.
+#[derive(Clone)]
+struct DocumentTab {
+    path: PathBuf,
+    file_name: String,
+    page: usize,
+    zoom: f32,
+    rotation: u8,
+    view_mode: ViewMode,
+    search_open: bool,
+    search_query: String,
+    search_index: usize,
+    /// Vertical position inside the current page, as a 0..1 fraction.
+    page_offset: f32,
 }
 
 struct ReaderApp {
     doc: Option<Arc<OfdDocument>>,
     renderer: Option<Arc<PageRenderer>>,
     file_path: Option<PathBuf>,
-    pending_initial: Option<PathBuf>,
+    pending_initial: Vec<PathBuf>,
+    tabs: Vec<DocumentTab>,
+    active_tab: Option<usize>,
+    pending_restore_scroll: Option<f32>,
     file_name: String,
     file_size: u64,
     sidebar_open: bool,
@@ -184,7 +224,12 @@ struct ReaderApp {
     search_query: String,
     search_hits: Vec<SearchHit>,
     search_index: usize,
+    search_results_scroll: ScrollHandle,
     search_highlights: Vec<search_highlight::Highlight>,
+    search_active_highlight: Option<search_highlight::Highlight>,
+    search_suppress_change: bool,
+    search_pending_index: Option<(String, usize)>,
+    search_pending_input: Option<String>,
     page_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     text_layout: Option<PageTextLayout>,
     selection_anchor: Option<usize>,
@@ -246,12 +291,126 @@ impl ReaderApp {
         }
     }
 
+    /// Stores the active reader state in its tab before the document is released.
+    fn snapshot_active_tab(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        if index >= self.tabs.len() {
+            return;
+        }
+        let page_offset = self.current_page_offset();
+        let tab = &mut self.tabs[index];
+        tab.search_open = self.search_open;
+        tab.search_query = self.search_query.clone();
+        tab.search_index = self.search_index;
+        if self.doc.is_none() {
+            return;
+        }
+        tab.page = self.page;
+        tab.zoom = self.zoom;
+        tab.rotation = self.rotation;
+        tab.view_mode = self.view_mode;
+        tab.page_offset = page_offset;
+        tab.file_name = self.file_name.clone();
+        if let Some(path) = &self.file_path {
+            tab.path = path.clone();
+        }
+    }
+
+    /// Fraction of the current page that is scrolled above the viewport.
+    fn current_page_offset(&self) -> f32 {
+        if self.view_mode != ViewMode::Continuous || self.page_count == 0 {
+            return 0.0;
+        }
+        let viewport = self.viewport;
+        let (top, height) = self.with_continuous_layout(viewport, |layout| {
+            (
+                layout.top(self.page),
+                layout.sizes.get(self.page).map_or(0.0, |size| size.1),
+            )
+        });
+        if height <= 0.0 {
+            return 0.0;
+        }
+        let scroll = -f32::from(self.continuous_scroll.offset().y);
+        ((scroll - top) / height).clamp(0.0, 1.0)
+    }
+
+    /// Releases every rendering resource owned by the active tab, then clears
+    /// the document state. Inactive tabs keep only their `DocumentTab` snapshot.
+    fn clear_active_document(&mut self, cx: &mut Context<Self>) {
+        self.doc_generation = self.doc_generation.wrapping_add(1);
+        let gpu = self.gpu.clone();
+        gpu.borrow_mut()
+            .release_all(|image| cx.drop_image(image, None));
+        self.doc = None;
+        self.renderer = None;
+        self.page_image = None;
+        self.image_dpi = 0;
+        self.page_cache.clear();
+        self.page_cache_order.clear();
+        self.page_cache_bytes = 0;
+        self.clear_tiles();
+        self.tile_order.clear();
+        self.tile_bytes = 0;
+        self.font_reports.clear();
+        self.continuous_pending.clear();
+        self.continuous_failed.clear();
+        self.continuous_last_scroll = None;
+        self.continuous_settle_pending = false;
+        self.continuous_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.continuous_layout = RefCell::new(continuous::LayoutCache::default());
+        self.page_sizes_revision = self.page_sizes_revision.wrapping_add(1);
+        self.render_seq = self.render_seq.wrapping_add(1);
+        self.latest_render = None;
+        self.thumbs.clear();
+        self.thumbs_started = false;
+        self.page_text_cache = None;
+        self.text_layout = None;
+        self.page_bounds.set(None);
+        self.clear_selection();
+        self.search_highlights.clear();
+        self.search_active_highlight = None;
+        self.search_hits.clear();
+        self.search_index = 0;
+        self.search_open = false;
+        self.search_query.clear();
+        self.search_pending_index = None;
+        self.search_pending_input = None;
+        self.pending_restore_page = None;
+        self.pending_restore_scroll = None;
+        self.page_count = 0;
+        self.page_sizes.clear();
+        self.loading = false;
+        self.error = None;
+        self.notice = None;
+        self.exporting = false;
+        self.grid_open = false;
+        self.info_dialog_open = false;
+        self.bar_visible = false;
+        self.bar_hovered = false;
+    }
+
+    fn activate_tab(&mut self, index: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.active_tab == Some(index) && self.doc.is_some() {
+            return;
+        }
+        if self.active_tab != Some(index) {
+            self.snapshot_active_tab();
+        }
+        self.load_tab(index, window, cx);
+    }
+
     fn max_page_dpi(&self) -> u32 {
         self.settings.performance.page_dpi_cap()
     }
 
     fn new(
-        initial: Option<PathBuf>,
+        initial: Vec<PathBuf>,
         viewport: Size<Pixels>,
         window_scale: f32,
         ui_font: font_policy::UiFont,
@@ -380,6 +539,9 @@ impl ReaderApp {
             renderer: None,
             file_path: None,
             pending_initial: initial,
+            tabs: Vec::new(),
+            active_tab: None,
+            pending_restore_scroll: None,
             file_name: String::new(),
             file_size: 0,
             sidebar_open: settings.appearance.sidebar_open,
@@ -426,7 +588,12 @@ impl ReaderApp {
             search_query: String::new(),
             search_hits: Vec::new(),
             search_index: 0,
+            search_results_scroll: ScrollHandle::new(),
             search_highlights: Vec::new(),
+            search_active_highlight: None,
+            search_suppress_change: false,
+            search_pending_index: None,
+            search_pending_input: None,
             page_bounds: Rc::new(Cell::new(None)),
             text_layout: None,
             selection_anchor: None,
@@ -475,41 +642,85 @@ impl ReaderApp {
         }
     }
 
-    fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn open_path(&mut self, path: PathBuf, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.save_position();
         self.settings.save();
         // Recent files and the export directory should not depend on the
         // directory the application happened to start in.
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            self.activate_tab(index, window, cx);
+            return;
+        }
+        self.snapshot_active_tab();
+        let page = if self.settings.reading.restore_position {
+            self.settings.position(&path).unwrap_or(0)
+        } else {
+            0
+        };
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        self.tabs.push(DocumentTab {
+            path,
+            file_name,
+            page,
+            zoom: 1.0,
+            rotation: 0,
+            view_mode: match self.settings.reading.default_view {
+                settings::ViewChoice::Single => ViewMode::Single,
+                settings::ViewChoice::Continuous => ViewMode::Continuous,
+            },
+            search_open: false,
+            search_query: String::new(),
+            search_index: 0,
+            page_offset: 0.0,
+        });
+        let index = self.tabs.len() - 1;
+        self.load_tab(index, window, cx);
+    }
+
+    /// Releases the previous document, restores the tab's reading state and
+    /// opens the file again through the ordinary single-document path.
+    fn load_tab(&mut self, index: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index).cloned() else {
+            return;
+        };
+        self.clear_active_document(cx);
+        self.active_tab = Some(index);
+        self.file_path = Some(tab.path.clone());
+        self.file_name = tab.file_name;
+        self.zoom = tab.zoom.max(0.1);
+        self.rotation = tab.rotation % 4;
+        self.view_mode = tab.view_mode;
+        self.search_open = tab.search_open;
+        self.search_query = tab.search_query.clone();
+        self.search_index = tab.search_index;
+        self.pending_restore_scroll = (tab.page_offset > 0.0).then_some(tab.page_offset);
+        self.load_document(tab.path, tab.page, window, cx);
+    }
+
+    fn load_document(
+        &mut self,
+        path: PathBuf,
+        target_page: usize,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         match OfdDocument::open(&path) {
             Ok(doc) => {
                 let doc = Arc::new(doc);
                 self.file_path = Some(path.clone());
-                self.settings.general.last_file = Some(path.to_string_lossy().into_owned());
+                self.file_size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
                 let recent_limit = self.settings.files.recent_limit;
                 recent::push_recent(&mut self.recent, &path, recent_limit);
                 recent::save_recent(&self.recent, recent_limit);
-                self.file_name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                self.file_size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
                 self.page_count = doc.page_count();
-                self.page = if self.settings.reading.restore_position {
-                    self.settings
-                        .position(&path)
-                        .unwrap_or(0)
-                        .min(self.page_count.saturating_sub(1))
-                } else {
-                    0
-                };
-                self.pending_restore_page =
-                    (self.page > 0 && self.page_count > 0).then_some(self.page);
-                self.view_mode = match self.settings.reading.default_view {
-                    settings::ViewChoice::Single => ViewMode::Single,
-                    settings::ViewChoice::Continuous => ViewMode::Continuous,
-                };
-                self.sidebar_open = self.settings.appearance.sidebar_open;
+                self.page = target_page.min(self.page_count.saturating_sub(1));
+                self.pending_restore_page = (self.page_count > 0
+                    && (self.page > 0 || self.pending_restore_scroll.is_some()))
+                .then_some(self.page);
                 let fallback = doc.meta.page_area.unwrap_or(SizeMm::new(210.0, 297.0));
                 // Do not scan every page on the UI thread. The visible page is
                 // resolved synchronously; the rest are filled in the background.
@@ -541,14 +752,26 @@ impl ReaderApp {
                 self.thumbs_started = false;
                 self.page_text_cache = None;
                 self.search_highlights.clear();
+                self.search_active_highlight = None;
                 self.clear_selection();
                 self.grid_open = false;
                 self.info_dialog_open = false;
                 self.error = None;
                 self.notice = None;
-                self.zoom = 1.0;
                 self.loading = true;
                 self.wheel_accum = 0.0;
+                self.settings.general.last_file = Some(path.to_string_lossy().into_owned());
+                self.settings.save();
+                self.restore_tab_search(window.as_deref_mut(), cx);
+                if let Some(window) = window {
+                    if self.search_open {
+                        if let Some(input) = &self.search_input {
+                            input.update(cx, |state, cx| state.focus(window, cx));
+                        }
+                    } else {
+                        window.focus(&self.focus_handle, cx);
+                    }
+                }
 
                 // Font database construction is expensive; keep the UI thread
                 // free so the window chrome and empty state paint immediately.
@@ -608,7 +831,8 @@ impl ReaderApp {
                         if let Some(page) = this.pending_restore_page.take()
                             && this.view_mode == ViewMode::Continuous
                         {
-                            this.scroll_to_continuous_page(this.viewport, page);
+                            let offset = this.pending_restore_scroll.take().unwrap_or(0.0);
+                            this.scroll_to_continuous_page_offset(this.viewport, page, offset);
                             this.sync_continuous_page(this.viewport, cx);
                             cx.notify();
                         }
@@ -617,12 +841,10 @@ impl ReaderApp {
                 .detach();
                 self.bar_visible = false;
                 self.bar_hovered = false;
-                self.settings.save();
             }
             Err(error) => {
                 self.bar_visible = false;
                 self.bar_hovered = false;
-                self.doc_generation = self.doc_generation.wrapping_add(1);
                 self.continuous_last_scroll = None;
                 self.continuous_settle_pending = false;
                 self.error = Some(format!(
@@ -649,12 +871,53 @@ impl ReaderApp {
                 self.thumbs_started = false;
                 self.page_text_cache = None;
                 self.search_highlights.clear();
+                self.search_active_highlight = None;
                 self.clear_selection();
                 self.page_count = 0;
                 self.page_sizes.clear();
                 self.file_size = 0;
                 self.loading = false;
             }
+        }
+    }
+
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let was_active = self.active_tab == Some(index);
+        if was_active {
+            self.tabs.remove(index);
+            self.active_tab = None;
+            if self.tabs.is_empty() {
+                self.clear_active_document(cx);
+                self.file_path = None;
+                self.file_name.clear();
+                self.file_size = 0;
+                self.page = 0;
+                self.pending_restore_page = None;
+                self.pending_restore_scroll = None;
+                self.settings.general.last_file = None;
+                self.settings.save();
+                self.set_search_input_value(window, "", cx);
+                window.focus(&self.focus_handle, cx);
+                cx.notify();
+                return;
+            }
+            let next = index.min(self.tabs.len() - 1);
+            self.activate_tab(next, Some(window), cx);
+        } else {
+            self.tabs.remove(index);
+            if let Some(active) = self.active_tab
+                && index < active
+            {
+                self.active_tab = Some(active - 1);
+            }
+            let active = self.active_tab.and_then(|active| self.tabs.get(active));
+            self.settings.general.last_file =
+                active.map(|tab| tab.path.to_string_lossy().into_owned());
+            self.settings.save();
+            cx.notify();
         }
     }
 
@@ -1124,6 +1387,44 @@ impl ReaderApp {
         self.continuous_scroll.set_offset(point(px(0.0), px(-top)));
     }
 
+    fn scroll_to_continuous_page_offset(&self, viewport: Size<Pixels>, page: usize, offset: f32) {
+        let top = self.continuous_top(viewport, page);
+        let height = self.continuous_page_size(viewport, page).1;
+        let y = top + height * offset.clamp(0.0, 1.0);
+        self.continuous_scroll.set_offset(point(px(0.0), px(-y)));
+    }
+
+    /// Puts a search match near the upper third of the continuous view.
+    fn scroll_to_search_match(
+        &mut self,
+        viewport: Size<Pixels>,
+        page: usize,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(highlight) = self.search_highlights.get(index) else {
+            return;
+        };
+        let (page_top, page_height, content_height) =
+            self.with_continuous_layout(viewport, |layout| {
+                (
+                    layout.top(page),
+                    layout.sizes.get(page).map_or(0.0, |size| size.1),
+                    layout.height,
+                )
+            });
+        if page_height <= 0.0 {
+            return;
+        }
+        let visible_height = (f32::from(viewport.height) - 124.0).max(240.0);
+        let match_y = page_top + (highlight.y + highlight.height * 0.5) * page_height;
+        let offset = (match_y - visible_height * 0.35)
+            .clamp(0.0, (content_height - visible_height).max(0.0));
+        self.continuous_scroll
+            .set_offset(point(px(0.0), px(-offset)));
+        self.ensure_continuous_pages(viewport, cx);
+    }
+
     fn continuous_page_at(&self, viewport: Size<Pixels>, scroll: f32) -> usize {
         self.with_continuous_layout(viewport, |layout| layout.page_at(scroll))
     }
@@ -1387,6 +1688,7 @@ impl ReaderApp {
                 self.refresh_search_highlights();
             } else {
                 self.search_highlights.clear();
+                self.search_active_highlight = None;
             }
             cx.notify();
         }
@@ -1528,19 +1830,28 @@ impl ReaderApp {
     }
 
     fn on_open(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_open(cx);
+    }
+
+    fn prompt_open(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some("打开 OFD 文件".into()),
         });
 
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = receiver.await
-                && let Some(path) = paths.into_iter().next()
-            {
+            if let Ok(Ok(Some(paths))) = receiver.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.open_path(path, cx);
+                    for path in paths {
+                        if path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("ofd"))
+                        {
+                            this.open_path(path, None, cx);
+                        }
+                    }
                     cx.notify();
                 });
             }
@@ -1765,23 +2076,80 @@ impl ReaderApp {
             self.close_search(window, cx);
             return;
         }
-        if self.search_input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索文档内容"));
-            cx.subscribe(&input, |this, _, event, cx| match event {
-                InputEvent::Change => this.run_search(cx),
-                InputEvent::PressEnter { shift, .. } => {
-                    this.search_step(if *shift { -1 } else { 1 }, cx);
-                }
-                _ => {}
-            })
-            .detach();
-            self.search_input = Some(input);
-        }
+        self.ensure_search_input(window, cx);
         self.search_open = true;
+        // Results live in the sidebar, so make sure it is visible when a
+        // search starts.
+        if self.doc.is_some() {
+            self.sidebar_open = true;
+        }
         if let Some(input) = &self.search_input {
             input.update(cx, |state, cx| state.focus(window, cx));
         }
         self.run_search(cx);
+    }
+
+    fn ensure_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.search_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索文档内容"));
+        cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::Change => {
+                if !this.search_suppress_change {
+                    this.run_search(cx);
+                }
+            }
+            InputEvent::PressEnter { shift, .. } => {
+                this.search_step(if *shift { -1 } else { 1 }, cx);
+            }
+            _ => {}
+        })
+        .detach();
+        self.search_input = Some(input.clone());
+        input
+    }
+
+    fn set_search_input_value(&mut self, window: &mut Window, value: &str, cx: &mut Context<Self>) {
+        if value.is_empty() && self.search_input.is_none() {
+            return;
+        }
+        let input = self.ensure_search_input(window, cx);
+        self.search_suppress_change = true;
+        input.update(cx, |state, cx| state.set_value(value, window, cx));
+        self.search_suppress_change = false;
+    }
+
+    /// Restores the tab's search query and selected hit after the document has
+    /// been reopened. The input widget is only synced when a window is around.
+    fn restore_tab_search(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.search_pending_index = None;
+        self.search_pending_input = None;
+        let saved_index = self.search_index;
+        if !self.search_open {
+            if let Some(window) = window {
+                self.set_search_input_value(window, "", cx);
+            } else {
+                self.search_pending_input = Some(String::new());
+            }
+            return;
+        }
+        let query = self.search_query.clone();
+        if let Some(window) = window {
+            self.set_search_input_value(window, &query, cx);
+        } else {
+            self.search_pending_input = Some(query.clone());
+        }
+        self.apply_search_query(query.clone(), cx);
+        if !self.search_hits.is_empty() {
+            self.search_index = saved_index.min(self.search_hits.len() - 1);
+            self.sync_search_active_highlight();
+            self.search_pending_index = Some((query, self.search_index));
+        }
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1790,6 +2158,9 @@ impl ReaderApp {
         self.search_hits.clear();
         self.search_index = 0;
         self.search_highlights.clear();
+        self.search_active_highlight = None;
+        self.search_pending_index = None;
+        self.search_pending_input = None;
         if let Some(input) = &self.search_input {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
@@ -1805,16 +2176,28 @@ impl ReaderApp {
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default();
+        self.apply_search_query(query, cx);
+    }
+
+    fn apply_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
         self.search_hits.clear();
         self.search_index = 0;
+        self.search_results_scroll
+            .set_offset(point(px(0.0), px(0.0)));
 
         let needle = self.search_query.trim();
         if needle.is_empty() {
+            self.search_pending_index = None;
+            self.search_highlights.clear();
+            self.search_active_highlight = None;
             cx.notify();
             return;
         }
         let Some(doc) = &self.doc else {
+            self.search_pending_index = None;
+            self.search_highlights.clear();
+            self.search_active_highlight = None;
             cx.notify();
             return;
         };
@@ -1828,6 +2211,7 @@ impl ReaderApp {
         let pages = self.page_text_cache.as_ref().expect("just built");
 
         'pages: for (page, texts) in pages.iter().enumerate() {
+            let mut page_match = 0;
             for text in texts {
                 let text = text.replace(['\n', '\r'], " ");
                 let mut from = 0;
@@ -1836,14 +2220,21 @@ impl ReaderApp {
                     let end = start + needle.len();
                     self.search_hits.push(SearchHit {
                         page,
+                        match_index: page_match,
                         snippet: search_snippet(&text, start, end),
                     });
+                    page_match += 1;
                     if self.search_hits.len() >= SEARCH_LIMIT {
                         break 'pages;
                     }
                     from = end;
                 }
             }
+        }
+        if let Some((pending_query, pending_index)) = self.search_pending_index.take()
+            && pending_query == self.search_query
+        {
+            self.search_index = pending_index.min(self.search_hits.len().saturating_sub(1));
         }
         self.refresh_search_highlights();
         cx.notify();
@@ -1852,6 +2243,7 @@ impl ReaderApp {
     /// Recomputes on-page highlight rectangles for the current page and query.
     fn refresh_search_highlights(&mut self) {
         self.search_highlights.clear();
+        self.search_active_highlight = None;
         if !self.search_open {
             return;
         }
@@ -1870,7 +2262,43 @@ impl ReaderApp {
         if let Ok(rects) = doc.page_search_rects(self.page, query) {
             self.search_highlights =
                 rotate::highlights(search_highlight::normalize(size, &rects), self.rotation);
+            self.sync_search_active_highlight();
         }
+    }
+
+    /// Points the distinct on-page colour at the result selected in the list.
+    fn sync_search_active_highlight(&mut self) {
+        self.search_active_highlight = self
+            .search_hits
+            .get(self.search_index)
+            .filter(|hit| hit.page == self.page)
+            .and_then(|hit| self.search_highlights.get(hit.match_index).cloned());
+    }
+
+    /// Reveals the selected hit: switches page when needed and centres the
+    /// match in the continuous view.
+    fn reveal_search_hit(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.settings.reading.search_auto_scroll {
+            cx.notify();
+            return;
+        }
+        let Some(hit) = self.search_hits.get(index) else {
+            return;
+        };
+        let (page, match_index) = (hit.page, hit.match_index);
+        if page != self.page {
+            self.go_to_page(page, cx);
+        }
+        if self.view_mode == ViewMode::Continuous {
+            // Scrolling clears the rects until it settles; selecting a result
+            // must restore them even if the pointer arrives mid-scroll.
+            if self.search_highlights.is_empty() {
+                self.refresh_search_highlights();
+            }
+            let viewport = self.viewport;
+            self.scroll_to_search_match(viewport, page, match_index, cx);
+        }
+        cx.notify();
     }
 
     fn search_step(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -1879,12 +2307,9 @@ impl ReaderApp {
         }
         let len = self.search_hits.len() as isize;
         self.search_index = (self.search_index as isize + delta).rem_euclid(len) as usize;
-        let page = self.search_hits[self.search_index].page;
-        if page != self.page && self.settings.reading.search_auto_scroll {
-            self.go_to_page(page, cx);
-        } else {
-            cx.notify();
-        }
+        self.search_results_scroll.scroll_to_item(self.search_index);
+        self.sync_search_active_highlight();
+        self.reveal_search_hit(self.search_index, cx);
     }
 
     fn select_search_hit(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1892,12 +2317,9 @@ impl ReaderApp {
             return;
         }
         self.search_index = index;
-        let page = self.search_hits[index].page;
-        if page != self.page && self.settings.reading.search_auto_scroll {
-            self.go_to_page(page, cx);
-        } else {
-            cx.notify();
-        }
+        self.search_results_scroll.scroll_to_item(index);
+        self.sync_search_active_highlight();
+        self.reveal_search_hit(index, cx);
     }
 
     fn ensure_text_layout(&mut self) {
@@ -2216,9 +2638,36 @@ impl ReaderApp {
             self.toggle_search(window, cx);
             return;
         }
+        if key == "o" && (modifiers.control || modifiers.platform) {
+            self.prompt_open(cx);
+            return;
+        }
+        if key == "w" && (modifiers.control || modifiers.platform) {
+            if let Some(index) = self.active_tab {
+                self.close_tab(index, window, cx);
+            }
+            return;
+        }
+        if key == "tab" && (modifiers.control || modifiers.platform) {
+            let len = self.tabs.len();
+            if len > 1 {
+                let current = self.active_tab.unwrap_or(0);
+                let next = if modifiers.shift {
+                    (current + len - 1) % len
+                } else {
+                    (current + 1) % len
+                };
+                self.activate_tab(next, Some(window), cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.search_open {
-            if key == "escape" {
-                self.close_search(window, cx);
+            match key {
+                "escape" => self.close_search(window, cx),
+                "up" => self.search_step(-1, cx),
+                "down" => self.search_step(1, cx),
+                _ => {}
             }
             return;
         }
@@ -2376,8 +2825,18 @@ impl ReaderApp {
                             .items_center()
                             .cursor_pointer()
                             .text_size(px(12.0))
-                            .text_color(rgb(p.text_tertiary))
-                            .child(icon(IconName::Minus, 14.0, 0x6B7280))
+                            .text_color(rgb(p.text_secondary))
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(p.window_control_hover))
+                                    .text_color(rgb(p.text))
+                            })
+                            .active(|style| {
+                                style
+                                    .bg(rgb(p.window_control_active))
+                                    .text_color(rgb(p.text))
+                            })
+                            .child(div().text_size(px(14.0)).child(IconName::Minus))
                             .on_click(|_, window, _| window.minimize_window()),
                     )
                     .child(
@@ -2390,8 +2849,18 @@ impl ReaderApp {
                             .items_center()
                             .cursor_pointer()
                             .text_size(px(12.0))
-                            .text_color(rgb(p.text_tertiary))
-                            .child(icon(IconName::Square, 12.0, 0x6B7280))
+                            .text_color(rgb(p.text_secondary))
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(p.window_control_hover))
+                                    .text_color(rgb(p.text))
+                            })
+                            .active(|style| {
+                                style
+                                    .bg(rgb(p.window_control_active))
+                                    .text_color(rgb(p.text))
+                            })
+                            .child(div().text_size(px(12.0)).child(IconName::Square))
                             .on_click(|_, window, _| window.zoom_window()),
                     )
                     .child(
@@ -2404,13 +2873,121 @@ impl ReaderApp {
                             .items_center()
                             .cursor_pointer()
                             .text_size(px(12.0))
-                            .text_color(rgb(p.text_tertiary))
-                            .child(icon(IconName::X, 13.0, 0x6B7280))
+                            .text_color(rgb(p.text_secondary))
+                            // Keep the close button's hover fill inside the
+                            // window's rounded top-right corner.
+                            .rounded_tr(corners.top_right)
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(p.window_close_hover))
+                                    .text_color(rgb(0xFFFFFF))
+                            })
+                            .active(|style| {
+                                style
+                                    .bg(rgb(p.window_close_active))
+                                    .text_color(rgb(0xFFFFFF))
+                            })
+                            .child(div().text_size(px(13.0)).child(IconName::X))
                             .on_click(|_, window, cx| {
                                 window.remove_window();
                                 cx.quit();
                             }),
                     ),
+            )
+    }
+
+    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette();
+        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
+            let active = self.active_tab == Some(index);
+            div()
+                .id(("doc-tab", index))
+                .relative()
+                .h_full()
+                .w(px(240.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .border_r_1()
+                .border_color(rgb(p.border))
+                .bg(if active { rgb(p.surface) } else { rgb(p.bg) })
+                .text_size(px(11.5))
+                .text_color(if active {
+                    rgb(p.text)
+                } else {
+                    rgb(p.text_secondary)
+                })
+                .cursor_pointer()
+                .when(!active, |this| this.hover(|style| style.bg(rgb(p.surface))))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate_tab(index, Some(window), cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_tab(index, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(2.0))
+                        .bg(if active {
+                            rgb(p.accent)
+                        } else {
+                            rgba(0x00000000)
+                        }),
+                )
+                .child(div().w(px(16.0)).flex_shrink_0())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_center()
+                        .text_ellipsis()
+                        .child(tab.file_name.clone()),
+                )
+                .child(
+                    div()
+                        .id(("doc-tab-close", index))
+                        .flex_shrink_0()
+                        .size(px(16.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .justify_center()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(p.window_control_hover)))
+                        .child(icon(IconName::X, 10.0, p.text_tertiary))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(index, window, cx);
+                        })),
+                )
+        });
+
+        div()
+            .h(px(34.0))
+            .flex_shrink_0()
+            .flex()
+            .items_stretch()
+            .bg(rgb(p.bg))
+            .border_b_1()
+            .border_color(rgb(p.border))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .overflow_x_scrollbar()
+                    .children(tabs),
             )
     }
 
@@ -2634,56 +3211,32 @@ impl ReaderApp {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette();
         let visible = self.page_count.min(THUMB_LIMIT);
+        let searching = self.search_open;
+        let tab = |label: &'static str, active: bool| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .border_b_2()
+                .border_color(if active {
+                    rgb(p.accent)
+                } else {
+                    rgb(p.sidebar)
+                })
+                .text_color(if active {
+                    rgb(p.text)
+                } else {
+                    rgb(p.text_tertiary)
+                })
+                .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
+                .child(label)
+        };
 
-        div()
-            .w(px(240.0))
-            .flex_shrink_0()
-            .h_full()
+        let thumbs = div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(p.sidebar))
-            .border_r_1()
-            .border_color(rgb(p.border))
-            .child(
-                div()
-                    .h(px(44.0))
-                    .flex()
-                    .items_center()
-                    .gap_5()
-                    .px_5()
-                    .text_size(px(11.5))
-                    .child(
-                        div()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .border_b_2()
-                            .border_color(rgb(p.accent))
-                            .text_color(rgb(p.text))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("缩略图"),
-                    )
-                    .child(
-                        div()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .border_b_2()
-                            .border_color(rgb(p.sidebar))
-                            .text_color(rgb(p.text_tertiary))
-                            .child("目录"),
-                    )
-                    .child(
-                        div()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .border_b_2()
-                            .border_color(rgb(p.sidebar))
-                            .text_color(rgb(p.text_tertiary))
-                            .child("书签"),
-                    ),
-            )
             .child(
                 div()
                     .h(px(32.0))
@@ -2699,6 +3252,7 @@ impl ReaderApp {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .px_3()
                     .pb_3()
@@ -2707,6 +3261,183 @@ impl ReaderApp {
                     .gap_3()
                     .children((0..visible).map(|index| self.thumbnail(index, cx))),
             )
+            .into_any_element();
+
+        div()
+            .w(px(240.0))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(p.sidebar))
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .child(
+                div()
+                    .h(px(44.0))
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .px_5()
+                    .text_size(px(11.5))
+                    .child(tab("缩略图", !searching))
+                    .child(tab("目录", false))
+                    .child(tab("书签", false))
+                    .child(tab("搜索结果", searching)),
+            )
+            .child(if searching {
+                self.sidebar_search_results(cx)
+            } else {
+                thumbs
+            })
+    }
+
+    /// Search results replace the thumbnail list while the search panel is
+    /// open, keeping the document visible next to a narrow result list.
+    fn sidebar_search_results(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette();
+        let query = self.search_query.trim();
+        let query_empty = query.is_empty();
+        let count = self.search_hits.len();
+        let position = if count == 0 {
+            String::new()
+        } else {
+            format!("{} / {}", self.search_index + 1, count)
+        };
+        let summary = if query_empty {
+            "等待输入".to_string()
+        } else if count == 0 {
+            "未找到匹配".to_string()
+        } else {
+            format!("{count} 处匹配")
+        };
+
+        let list = if query_empty {
+            div()
+                .px_4()
+                .py_3()
+                .text_size(px(11.0))
+                .text_color(rgb(p.text_tertiary))
+                .child("输入关键词搜索文档内容")
+                .into_any_element()
+        } else if count == 0 {
+            div()
+                .px_4()
+                .py_3()
+                .text_size(px(11.0))
+                .text_color(rgb(p.text_tertiary))
+                .child("未找到匹配内容")
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("sidebar-search-results")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.search_results_scroll)
+                        .pb_2()
+                        .flex()
+                        .flex_col()
+                        .children(self.search_hits.iter().enumerate().map(|(index, hit)| {
+                            let current = index == self.search_index;
+                            let snippet = highlight_matches(&hit.snippet, query, p.search_match);
+                            div()
+                                .id(("sidebar-search-hit", index))
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .px_4()
+                                .py_3()
+                                // The accent rail marks the result that Enter and the
+                                // arrow keys currently point at.
+                                .border_l_2()
+                                .border_color(if current {
+                                    rgb(p.accent)
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .bg(if current {
+                                    rgb(p.surface)
+                                } else {
+                                    rgb(p.sidebar)
+                                })
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(p.surface)))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .text_size(px(10.0))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(p.accent))
+                                                .child(format!("第 {} 页", hit.page + 1)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(p.text_tertiary))
+                                                .child(format!("{}", index + 1)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(p.text_secondary))
+                                        .child(snippet),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_search_hit(index, cx)
+                                }))
+                        }))
+                        .child(
+                            div()
+                                .mx_4()
+                                .mt_3()
+                                .border_t_1()
+                                .border_color(rgb(p.border))
+                                .pt_3()
+                                .pb_3()
+                                .text_size(px(10.5))
+                                .text_color(rgb(p.text_tertiary))
+                                .text_center()
+                                .child(if count >= SEARCH_LIMIT {
+                                    format!("已显示前 {count} 条结果")
+                                } else {
+                                    "已显示全部结果".to_string()
+                                }),
+                        ),
+                )
+                .vertical_scrollbar(&self.search_results_scroll)
+                .into_any_element()
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(32.0))
+                    .px_5()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(10.0))
+                    .text_color(rgb(p.text_tertiary))
+                    .child(summary)
+                    .child(position),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     fn info_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3065,12 +3796,29 @@ impl ReaderApp {
             .shadow_lg()
             .child(icon(IconName::Search, 16.0, p.accent))
             .child(
-                div().flex_1().child(
-                    Input::new(input)
-                        .appearance(false)
-                        .focus_bordered(false)
-                        .text_size(px(12.5)),
-                ),
+                div()
+                    .flex_1()
+                    // Arrow keys move through the sidebar results instead of
+                    // the single-line input's caret.
+                    .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "up" => {
+                                this.search_step(-1, cx);
+                                cx.stop_propagation();
+                            }
+                            "down" => {
+                                this.search_step(1, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .child(
+                        Input::new(input)
+                            .appearance(false)
+                            .focus_bordered(false)
+                            .text_size(px(12.5)),
+                    ),
             )
             .child(
                 div()
@@ -3119,79 +3867,6 @@ impl ReaderApp {
                     .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
             );
 
-        let results: Option<AnyElement> =
-            if query_empty {
-                None
-            } else if count == 0 {
-                Some(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(10.0))
-                        .bg(rgb(p.surface))
-                        .border_1()
-                        .border_color(rgb(p.border))
-                        .text_size(px(11.0))
-                        .text_color(rgb(p.text_tertiary))
-                        .child("未找到匹配内容")
-                        .into_any_element(),
-                )
-            } else {
-                Some(
-                    div()
-                        .max_h(px(280.0))
-                        .overflow_y_scrollbar()
-                        .p_1()
-                        .rounded(px(10.0))
-                        .bg(rgb(p.surface))
-                        .border_1()
-                        .border_color(rgb(p.border))
-                        .shadow_lg()
-                        .children(self.search_hits.iter().enumerate().take(60).map(
-                            |(index, hit)| {
-                                let current = index == self.search_index;
-                                div()
-                                    .id(("search-hit", index))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(px(6.0))
-                                    .cursor_pointer()
-                                    .bg(if current {
-                                        Hsla::from(rgb(p.accent_soft))
-                                    } else {
-                                        gpui::transparent_black()
-                                    })
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_between()
-                                            .text_size(px(10.0))
-                                            .text_color(if current {
-                                                rgb(p.accent)
-                                            } else {
-                                                rgb(p.text_tertiary)
-                                            })
-                                            .child(format!("第 {} 页", hit.page + 1))
-                                            .child(format!("{}", index + 1)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(p.text_secondary))
-                                            .child(hit.snippet.clone()),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_search_hit(index, cx)
-                                    }))
-                            },
-                        ))
-                        .into_any_element(),
-                )
-            };
-
         div()
             .absolute()
             .top(px(12.0))
@@ -3199,15 +3874,7 @@ impl ReaderApp {
             .right(px(0.0))
             .flex()
             .justify_center()
-            .child(
-                div()
-                    .w(px(520.0))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(bar)
-                    .children(results),
-            )
+            .child(div().w(px(520.0)).flex().flex_col().gap_2().child(bar))
             .into_any_element()
     }
 
@@ -3725,7 +4392,13 @@ impl ReaderApp {
             if !self.search_highlights.is_empty() {
                 card = card.child(overlay_layer(
                     self.search_highlights.clone(),
-                    rgba(0xFFD54A80),
+                    rgba(SEARCH_HIGHLIGHT),
+                ));
+            }
+            if let Some(active) = &self.search_active_highlight {
+                card = card.child(overlay_layer(
+                    vec![active.clone()],
+                    rgba(SEARCH_ACTIVE_HIGHLIGHT),
                 ));
             }
             if !self.selection_rects.is_empty() {
@@ -4027,6 +4700,12 @@ impl ReaderApp {
 impl Render for ReaderApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette();
+        if let Some(value) = self.search_pending_input.take() {
+            cx.defer_in(window, move |this, window, cx| {
+                this.set_search_input_value(window, &value, cx);
+                cx.notify();
+            });
+        }
         let root_font = Font {
             family: self.ui_font.family.clone(),
             fallbacks: (!self.ui_font.fallbacks.is_empty())
@@ -4128,7 +4807,13 @@ impl Render for ReaderApp {
                 if !self.search_highlights.is_empty() {
                     stack = stack.child(overlay_layer(
                         self.search_highlights.clone(),
-                        rgba(0xFFD54A80),
+                        rgba(SEARCH_HIGHLIGHT),
+                    ));
+                }
+                if let Some(active) = &self.search_active_highlight {
+                    stack = stack.child(overlay_layer(
+                        vec![active.clone()],
+                        rgba(SEARCH_ACTIVE_HIGHLIGHT),
                     ));
                 }
                 if !self.selection_rects.is_empty() {
@@ -4233,8 +4918,8 @@ impl Render for ReaderApp {
                                                     .text_color(rgb(p.text_tertiary))
                                                     .child(parent),
                                             )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.open_path(path.clone(), cx);
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_path(path.clone(), Some(window), cx);
                                             }))
                                     },
                                 )),
@@ -4248,7 +4933,7 @@ impl Render for ReaderApp {
         let mut canvas = div()
             .id("page-canvas")
             .flex_1()
-            .h_full()
+            .min_h_0()
             .relative()
             .flex()
             .justify_center()
@@ -4304,15 +4989,27 @@ impl Render for ReaderApp {
             );
         }
 
+        let mut reading = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .min_h_0()
+            .flex()
+            .flex_col();
+        if self.tabs.len() > 1 {
+            reading = reading.child(self.tab_bar(cx));
+        }
+        let reading = reading.child(canvas);
+
         let body = if self.doc.is_some() && self.sidebar_open {
             div()
                 .flex_1()
                 .flex()
                 .overflow_hidden()
                 .child(self.sidebar(cx))
-                .child(canvas)
+                .child(reading)
         } else {
-            div().flex_1().flex().overflow_hidden().child(canvas)
+            div().flex_1().flex().overflow_hidden().child(reading)
         };
 
         // GPUI Kit owns the only outer frame. Its border is 1px, so content
@@ -4332,14 +5029,14 @@ impl Render for ReaderApp {
             .text_color(rgb(p.text))
             .on_mouse_move(cx.listener(Self::on_pointer_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_page_mouse_up))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths();
                 let ofd = paths.iter().find(|path| {
                     path.extension()
                         .is_some_and(|extension| extension.eq_ignore_ascii_case("ofd"))
                 });
                 if let Some(path) = ofd.or_else(|| paths.first()) {
-                    this.open_path(path.clone(), cx);
+                    this.open_path(path.clone(), Some(window), cx);
                 }
             }))
             .rounded_tl(corners.top_left)
@@ -4534,6 +5231,19 @@ fn icon(name: IconName, size: f32, color: u32) -> impl IntoElement {
 }
 
 /// Short context around a match, trimmed to whole characters.
+/// Highlights every occurrence of `query` inside a search snippet.
+fn highlight_matches(text: &str, query: &str, color: u32) -> StyledText {
+    let highlight = HighlightStyle {
+        color: Some(Hsla::from(rgb(color))),
+        font_weight: Some(FontWeight::SEMIBOLD),
+        ..Default::default()
+    };
+    StyledText::new(text.to_string()).with_highlights(
+        text.match_indices(query)
+            .map(move |(start, matched)| (start..start + matched.len(), highlight)),
+    )
+}
+
 fn search_snippet(text: &str, start: usize, end: usize) -> String {
     let mut begin = start;
     for _ in 0..16 {
@@ -4616,17 +5326,22 @@ fn human_size(bytes: u64) -> String {
 fn main() {
     ofd_core::preload_system_fonts();
     let settings = settings::Settings::load();
-    let initial = std::env::args_os()
-        .nth(1)
+    let initial: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
         .map(PathBuf::from)
         .filter(|path| path.exists())
-        .or_else(|| {
-            settings
-                .general
-                .restore_last_file
-                .then(|| settings.last_file_path())
-                .flatten()
-        });
+        .collect();
+    let initial = if initial.is_empty() {
+        settings
+            .general
+            .restore_last_file
+            .then(|| settings.last_file_path())
+            .flatten()
+            .into_iter()
+            .collect()
+    } else {
+        initial
+    };
 
     gpui_kit::application()
         .with_assets(assets::ReaderAssets)
@@ -4681,10 +5396,11 @@ fn main() {
                     // Open after the first frame so the window appears at once.
                     window.defer(cx, {
                         let reader = reader.clone();
-                        move |_window, cx| {
+                        move |window, cx| {
                             reader.update(cx, |this, cx| {
-                                if let Some(path) = this.pending_initial.take() {
-                                    this.open_path(path, cx);
+                                let paths = std::mem::take(&mut this.pending_initial);
+                                for path in paths {
+                                    this.open_path(path, Some(&mut *window), cx);
                                 }
                             });
                         }
