@@ -1,4 +1,4 @@
-use super::frame_is_current;
+use crate::frame_is_current;
 
 #[test]
 fn stale_or_wrong_page_frames_are_dropped() {

@@ -1,6 +1,6 @@
-use super::pointer_moved;
-use super::{Bounds, near_floating_bar, size};
-use super::{ScrollDelta, point, px, wheel_zoom_factor};
+use crate::{
+    Bounds, ScrollDelta, near_floating_bar, point, pointer_moved, px, size, wheel_zoom_factor,
+};
 
 #[test]
 fn only_bottom_center_of_reading_area_reveals_toolbar() {

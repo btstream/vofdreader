@@ -1,4 +1,4 @@
-use super::search_snippet;
+use crate::search_snippet;
 
 #[test]
 fn snippet_trims_to_whole_chars_and_marks_ellipsis() {

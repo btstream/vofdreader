@@ -668,15 +668,3 @@ fn main() {
             cx.activate(true);
         });
 }
-
-#[cfg(test)]
-mod window_tests;
-
-#[cfg(test)]
-mod bar_tests;
-
-#[cfg(test)]
-mod render_tests;
-
-#[cfg(test)]
-mod search_tests;

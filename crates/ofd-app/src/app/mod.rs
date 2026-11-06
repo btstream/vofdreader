@@ -7,3 +7,6 @@ pub(crate) mod selection;
 pub(crate) mod tabs;
 pub(crate) mod theme;
 pub(crate) mod view;
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -1,4 +1,4 @@
-use super::{Corners, Decorations, Tiling, content_corners, px};
+use crate::{Corners, Decorations, Tiling, content_corners, px};
 
 #[test]
 fn floating_content_has_four_concentric_corners() {
