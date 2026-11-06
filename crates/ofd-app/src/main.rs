@@ -30,6 +30,7 @@ mod rotate;
 mod search_highlight;
 mod settings;
 mod settings_view;
+mod single_instance;
 mod tiles;
 
 /// Colors for one appearance mode. Kept separate from the component theme so
@@ -411,6 +412,7 @@ impl ReaderApp {
 
     fn new(
         initial: Vec<PathBuf>,
+        instance_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
         viewport: Size<Pixels>,
         window_scale: f32,
         ui_font: font_policy::UiFont,
@@ -526,6 +528,42 @@ impl ReaderApp {
                         );
                     }
                 });
+            })
+            .detach();
+        }
+
+        if let Some(receiver) = instance_rx {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(150))
+                        .await;
+                    let mut paths = Vec::new();
+                    let mut received = false;
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(batch) => {
+                                received = true;
+                                paths.extend(batch);
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    if !received {
+                        continue;
+                    }
+                    let opened = this.update(cx, |this, cx| {
+                        for path in paths {
+                            this.open_path(path, None, cx);
+                        }
+                        cx.activate(true);
+                        cx.notify();
+                    });
+                    if opened.is_err() {
+                        return;
+                    }
+                }
             })
             .detach();
         }
@@ -5324,14 +5362,19 @@ fn human_size(bytes: u64) -> String {
 }
 
 fn main() {
-    ofd_core::preload_system_fonts();
-    let settings = settings::Settings::load();
-    let initial: Vec<PathBuf> = std::env::args_os()
+    let launch_paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
         .filter(|path| path.exists())
         .collect();
-    let initial = if initial.is_empty() {
+    if single_instance::forward_to_running(&launch_paths) {
+        return;
+    }
+    let instance_rx = single_instance::listen();
+
+    ofd_core::preload_system_fonts();
+    let settings = settings::Settings::load();
+    let initial = if launch_paths.is_empty() {
         settings
             .general
             .restore_last_file
@@ -5340,7 +5383,7 @@ fn main() {
             .into_iter()
             .collect()
     } else {
-        initial
+        launch_paths
     };
 
     gpui_kit::application()
@@ -5368,6 +5411,7 @@ fn main() {
             let ui_font = font_policy::ui_font();
             cx.open_window(options, {
                 let initial = initial.clone();
+                let instance_rx = instance_rx;
                 let settings = settings.clone();
                 let ui_font = ui_font.clone();
                 move |window, cx| {
@@ -5385,6 +5429,7 @@ fn main() {
                     let reader = cx.new(|cx| {
                         ReaderApp::new(
                             initial.clone(),
+                            instance_rx,
                             viewport,
                             window_scale,
                             ui_font.clone(),
