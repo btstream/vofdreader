@@ -179,6 +179,9 @@ impl ReaderApp {
             .flex_col()
             .px(px(12.0))
             .py(px(12.0))
+            // GPUI only clips children to a rectangle, so this fill would
+            // otherwise square off the dialog's rounded bottom-left corner.
+            .rounded_bl(px(13.0))
             .bg(rgb(p.sidebar))
             .border_r_1()
             .border_color(rgb(p.border))
