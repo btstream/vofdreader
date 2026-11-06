@@ -410,6 +410,7 @@ impl ReaderApp {
         self.settings.performance.page_dpi_cap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         initial: Vec<PathBuf>,
         instance_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
