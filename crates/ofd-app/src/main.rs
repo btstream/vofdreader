@@ -559,6 +559,11 @@ impl ReaderApp {
                             this.open_path(path, None, cx);
                         }
                         cx.activate(true);
+                        if let Some(window) = cx.windows().first().copied() {
+                            let _ = window.update(cx, |_, window, _| {
+                                window.activate_window();
+                            });
+                        }
                         cx.notify();
                     });
                     if opened.is_err() {
