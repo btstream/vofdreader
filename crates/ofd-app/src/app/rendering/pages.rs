@@ -105,7 +105,13 @@ impl ReaderApp {
 
         // Prefer an exact bitmap, otherwise reuse any sharper one. A larger
         // bitmap shown smaller stays crisp and avoids a redundant render.
-        if let Some((cached_dpi, image)) = self.cached_page_image(page, dpi) {
+        let has_cached_at_least = self
+            .raster
+            .page_cache
+            .keys()
+            .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi);
+        if has_cached_at_least && let Some((cached_dpi, image)) = self.cached_page_image(page, dpi)
+        {
             self.raster.page_image = Some(image);
             self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
@@ -118,32 +124,44 @@ impl ReaderApp {
         // rasterize only the final uncached page after the gesture settles.
         // Neighbour prefetch is deliberately low-DPI. Display it immediately
         // on navigation, then refine instead of ignoring a useful cached frame.
-        if self.raster.page_image.is_none()
-            && let Some(preview_dpi) = self
-                .raster
-                .page_cache
-                .keys()
-                .filter(|(cached_page, _)| *cached_page == page)
-                .map(|(_, dpi)| *dpi)
-                .max()
+        let best_cached = self
+            .raster
+            .page_cache
+            .keys()
+            .filter(|(cached_page, _)| *cached_page == page)
+            .map(|(_, dpi)| *dpi)
+            .max();
+        if let render_policy::PreviewSource::Cached(preview_dpi) =
+            render_policy::preview_density(render_policy::PreviewInput {
+                best_cached_dpi: best_cached,
+                image_missing: self.raster.page_image.is_none(),
+            })
             && let Some((cached_dpi, image)) = self.cached_page_image(page, preview_dpi)
         {
             self.raster.page_image = Some(image);
             self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
         }
-        if self.continuous_scrolling() || self.tile_busy() || !self.raster.tasks.is_empty() {
-            return;
-        }
 
-        // Coalesce an identical in-flight request (e.g. several frames asking
-        // for the same density while a render is running).
-        if self
-            .raster
-            .latest_render
-            .is_some_and(|pending| pending.page == page && pending.dpi == dpi)
-        {
-            return;
+        let plan = render_policy::plan_single_page(render_policy::SinglePageInput {
+            target_dpi: dpi,
+            has_cached_at_least,
+            gesture_active: self.continuous_scrolling() || self.tile_busy(),
+            other_jobs_active: !self.raster.tasks.is_empty(),
+            pending_request: self
+                .raster
+                .latest_render
+                .map(|pending| (pending.page, pending.dpi)),
+            page,
+        });
+        match plan {
+            // Handled above; listed so a new variant cannot silently start a
+            // render without a matching branch.
+            render_policy::SinglePagePlan::UseCached => return,
+            render_policy::SinglePagePlan::Wait | render_policy::SinglePagePlan::Coalesced => {
+                return;
+            }
+            render_policy::SinglePagePlan::Render { .. } => {}
         }
 
         self.raster.render_seq = self.raster.render_seq.wrapping_add(1);
@@ -319,12 +337,13 @@ impl ReaderApp {
                         if !this.thumbnail_batch_is_current(generation, batch) {
                             return None;
                         }
-                        Some(
-                            !this.continuous_scrolling()
-                                && this.raster.tasks.is_empty()
-                                && !this.tile_busy()
-                                && this.raster.latest_render.is_none(),
-                        )
+                        Some(render_policy::may_render_thumbnail(
+                            true,
+                            this.continuous_scrolling(),
+                            this.raster.tasks.targets().any(|target| target.is_page()),
+                            this.tile_busy(),
+                            this.raster.latest_render.is_some(),
+                        ))
                     });
                     match ready {
                         Ok(Some(true)) => break,
@@ -370,18 +389,22 @@ impl ReaderApp {
     }
 
     pub(crate) fn request_cached_page(&mut self, page: usize, dpi: u32, cx: &mut Context<Self>) {
-        if page >= self.active.page_count()
-            || !continuous::render_ready(self.raster_jobs(), self.tile_slots)
-            || self.raster.latest_render.is_some()
-        {
-            return;
-        }
-        if self
-            .raster
-            .page_cache
-            .keys()
-            .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi)
-        {
+        let target = TaskTarget::page(page, dpi);
+        let admission = render_policy::CachedPageInput {
+            page,
+            page_count: self.active.page_count(),
+            raster_jobs: self.raster_jobs(),
+            slots: self.tile_slots,
+            single_page_job_active: self.raster.latest_render.is_some(),
+            cached_sharp_enough: self
+                .raster
+                .page_cache
+                .keys()
+                .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi),
+            already_failed: self.raster.continuous_failed.contains(&(page, dpi)),
+            already_in_flight: self.raster.tasks.contains(target),
+        };
+        if !render_policy::may_request_cached_page(admission) {
             return;
         }
         let Some(doc) = self.active.doc.clone() else {
@@ -390,12 +413,6 @@ impl ReaderApp {
         let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
-        let target = TaskTarget::page(page, dpi);
-        if self.raster.continuous_failed.contains(&(page, dpi))
-            || self.raster.tasks.contains(target)
-        {
-            return;
-        }
         let epoch = self.render_epoch();
         let ticket = self.raster.tasks.start(target, 0, epoch);
         let rotation = self.rotation;
@@ -420,7 +437,10 @@ impl ReaderApp {
                 // Do not retain a completed frame outside the current visible
                 // and nearby-prefetch horizon. There is one in-flight job.
                 if let Ok((width, height, pixels)) = result
-                    && this.nearby_page_range().contains(&page)
+                    && render_policy::may_retain_cached_page(
+                        this.nearby_page_range().contains(&page),
+                        true,
+                    )
                     && let Some(buffer) = image::RgbaImage::from_raw(width, height, pixels)
                 {
                     let bytes = width as usize * height as usize * 4;

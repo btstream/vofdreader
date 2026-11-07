@@ -117,7 +117,7 @@ this.raster.cache_tile(...);   // 可能因预算拒绝
 |---|---|---|
 | 0 | 行为基线与风险核验 | 完成 |
 | 1 | 统一任务身份与结算 | 完成 |
-| 2 | 抽离任务准入与请求规划 | 待开始 |
+| 2 | 抽离任务准入与请求规划 | 完成 |
 | 3 | 收敛 GPUI 异步执行适配 | 待开始 |
 | 4 | 统一结果接纳 | 待开始 |
 | 5 | 整理资源登记与释放边界 | 待开始 |
@@ -182,8 +182,45 @@ continuous_pending: HashSet<(page, dpi)>
 - `resources/pdf-match/1.ofd` PNG 与基线一致
 - `resources/y.ofd` PNG/SVG 与基线一致
 
+## 阶段 2 完成情况
+
+`render_policy` 改为目录模块：
+
+```text
+render_policy/
+├── mod.rs       请求标识、画面替换、预取排序与预算
+└── admission.rs 任务准入
+```
+
+`admission.rs` 全部是纯函数，不引用 GPUI：
+
+| 函数 | 取代的内联判断 |
+|---|---|
+| `plan_single_page` | 单页：命中缓存、等待手势或任务、合并同请求、开始渲染 |
+| `may_request_cached_page` | 连续页/预取的六项提前返回 |
+| `may_schedule_prefetch` | 预取总闸门（文档、渲染器、总览、滚动、防抖、加载） |
+| `may_start_tile` | 分块是否可启动 |
+| `may_keep_tile` | 分块结果是否仍在预算内 |
+| `may_render_thumbnail` | 缩略图是否让路给前台 |
+| `preview_density` | 是否用缓存低清图临时占位 |
+| `may_retain_cached_page` | 结果是否仍在可见/预取范围内 |
+| `result_is_usable` | 代际是否仍匹配 |
+
+渲染模块现在是"取值 → 调策略 → 执行或返回"，不再各自维护准入条件。
+新增 11 个准入测试，覆盖每个提前返回分支。
+
+### 行为一致性
+
+单页路径的判断顺序保持与原实现相同：先精确/更清晰缓存，再低清占位，
+再判断手势与在途任务，最后合并相同请求。策略函数只承载判断，不改变顺序。
+
+### 回归结果
+
+- `cargo fmt`、Clippy `-D warnings`、全工作区测试通过（app 98 项）
+- `resources/pdf-match/1.ofd` PNG 与基线一致
+- `resources/y.ofd` PNG/SVG 与基线一致
+
 ## 下一阶段
 
-阶段 2：抽离任务准入与请求规划。目标是把“是否提交、提交什么、优先级”
-从 `request_page_render` / `request_cached_page` / `start_tile` 中移到
-`render_policy`，执行层只负责启动与结果转交。
+阶段 3：收敛 GPUI 异步执行适配。把后台光栅化、像素旋转与
+`RenderImage` 转换从各闭包集中到一处，闭包只保留"领取票、启动、交回结果"。

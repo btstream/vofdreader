@@ -46,14 +46,17 @@ impl ReaderApp {
     pub(crate) fn schedule_nearby(&mut self, cx: &mut Context<Self>) {
         // Continuous scrolling keeps prefetching so pages are ready before
         // they appear; single-page wheel bursts still coalesce.
-        if !self.active.is_open()
-            || self.active.renderer.is_none()
-            || self.grid_open
-            || (self.view_mode == ViewMode::Single && self.continuous_scrolling())
-            || self.raster.dpi_pending
-            || self.raster.latest_render.is_some()
-            || self.active.loading
-        {
+        let gate = render_policy::PrefetchGate {
+            document_open: self.active.is_open(),
+            renderer_ready: self.active.renderer.is_some(),
+            grid_open: self.grid_open,
+            single_page_scrolling: self.view_mode == ViewMode::Single
+                && self.continuous_scrolling(),
+            dpi_pending: self.raster.dpi_pending,
+            single_page_job_active: self.raster.latest_render.is_some(),
+            page_loading: self.active.loading,
+        };
+        if !render_policy::may_schedule_prefetch(gate) {
             return;
         }
         // Fill every free slot with visible tiles first; nearby pages and
@@ -170,10 +173,13 @@ impl ReaderApp {
     pub(crate) fn start_tile(&mut self, include_prefetch: bool, cx: &mut Context<Self>) -> bool {
         // Continuous scrolling keeps rendering visible tiles; page and tile
         // jobs share the render slots (see `raster_jobs`).
-        if (self.view_mode == ViewMode::Single && self.continuous_scrolling())
-            || self.raster.dpi_pending
-            || self.raster.latest_render.is_some()
-        {
+        let gate = render_policy::TileGate {
+            single_page_scrolling: self.view_mode == ViewMode::Single
+                && self.continuous_scrolling(),
+            dpi_pending: self.raster.dpi_pending,
+            single_page_job_active: self.raster.latest_render.is_some(),
+        };
+        if !render_policy::may_start_tile(gate) {
             return false;
         }
         let wanted = self.tile_requests(include_prefetch);
@@ -209,7 +215,13 @@ impl ReaderApp {
             })
             .sum();
         let in_flight = self.raster.tasks.tile_bytes();
-        if protected_bytes + in_flight + bytes > self.cache_config.tile_bytes() {
+        if !render_policy::may_keep_tile(
+            true,
+            protected_bytes,
+            in_flight,
+            bytes,
+            self.cache_config.tile_bytes(),
+        ) {
             return false;
         }
         let epoch = self.render_epoch();
@@ -239,7 +251,7 @@ impl ReaderApp {
             let _ = this.update(cx, |this, cx| {
                 let info = this.raster.tasks.finish(ticket);
                 if info.is_some()
-                    && epoch.matches(this.render_epoch())
+                    && render_policy::result_is_usable(epoch, this.render_epoch())
                     && this.tile_requests(true).contains(&key)
                 {
                     match result {

@@ -3,6 +3,10 @@
 //! Keeping these out of the GPUI closures makes the "which background result
 //! may touch the screen" rules testable without a window.
 
+mod admission;
+
+pub(crate) use admission::*;
+
 /// Identity of one whole-page raster request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct PageRequest {
