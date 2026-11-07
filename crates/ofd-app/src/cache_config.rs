@@ -1,5 +1,9 @@
 //! Cache policy boundary for a future settings/config-file adapter.
-//! Limits cover retained raster results, not whole-process RAM or GPU memory.
+//!
+//! `total_mib` bounds retained page and tile bitmaps plus a small transient
+//! in-flight allowance; see `docs/MEMORY_BUDGET.md`. It is not a whole-process
+//! RSS limit and does not cover fonts, parsed pages, decoded images or GPU
+//! textures.
 const MIB: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
@@ -18,8 +22,8 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
-    /// Central validation for future user settings. Apply when constructing a
-    /// reader; changing a live reader's policy/evicting its cache is not exposed.
+    /// Central validation for user settings. A live change is applied through
+    /// `ReaderApp::apply_cache_config`, which also updates the ledger.
     pub fn new(total_mib: usize, page_limit: usize, parsed_page_limit: usize) -> Self {
         Self {
             total_bytes: total_mib.clamp(64, 2048) * MIB,
@@ -30,6 +34,13 @@ impl CacheConfig {
         }
     }
 
+    /// Total bitmaps the reader may retain. Used by the memory ledger.
+    pub fn total_bytes(self) -> usize {
+        self.total_bytes
+    }
+
+    /// Share of the setting reserved for the page cache. The tile cache has
+    /// its own slice so a zoomed page cannot starve page prefetching.
     pub fn page_bytes(self) -> usize {
         self.total_bytes / 4 * 3
     }

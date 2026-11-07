@@ -156,6 +156,8 @@ impl ReaderApp {
     }
 
     pub(crate) fn tile_busy(&self) -> bool {
+        // Stale tile jobs still occupy a worker slot, so they count here: the
+        // renderer cannot start another tile until one of them returns.
         self.raster.tasks.targets().any(|target| !target.is_page())
     }
 
@@ -186,7 +188,10 @@ impl ReaderApp {
         let Some(key) = wanted.iter().copied().find(|key| {
             !self.raster.tile_cache.contains_key(key)
                 && !self.raster.tile_failed.contains(key)
-                && !self.raster.tasks.contains(TaskTarget::tile(*key))
+                && !self
+                    .raster
+                    .tasks
+                    .contains_current(TaskTarget::tile(*key), self.render_epoch())
         }) else {
             return false;
         };
@@ -224,6 +229,9 @@ impl ReaderApp {
         ) {
             return false;
         }
+        let Ok(reservation) = self.raster.reserve(bytes) else {
+            return false;
+        };
         let epoch = self.render_epoch();
         let ticket: TaskTicket = self.raster.tasks.start(TaskTarget::tile(key), bytes, epoch);
         let rotation = self.rotation;
@@ -246,6 +254,12 @@ impl ReaderApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let info = this.raster.tasks.finish(ticket);
+                match &result {
+                    Ok((image, bytes)) => {
+                        this.raster.finish_reservation(reservation, image, *bytes);
+                    }
+                    Err(_) => this.raster.cancel_reservation(reservation),
+                }
                 if info.is_none() {
                     // Cleared by a document switch or invalidation; the slot
                     // was already forgotten, so the result is unusable.

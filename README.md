@@ -177,6 +177,7 @@ crates/
 | [`docs/GPU_PERF.md`](docs/GPU_PERF.md) | GPU 纹理生命周期、绘制诊断和 Linux 采样 |
 | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | 依赖与 Cargo 特性说明 |
 | [`docs/SETTINGS.md`](docs/SETTINGS.md) | 设置界面和配置持久化 |
+| [`docs/MEMORY_BUDGET.md`](docs/MEMORY_BUDGET.md) | 位图内存预算、计费与降级行为 |
 | [`docs/WINDOW_DECORATIONS.md`](docs/WINDOW_DECORATIONS.md) | 自绘窗口装饰和圆角实现 |
 | [`docs/coordinates.md`](docs/coordinates.md) | 样本坐标与排版验证记录 |
 

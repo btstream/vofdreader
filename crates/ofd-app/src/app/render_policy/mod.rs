@@ -9,6 +9,8 @@ mod admission;
 pub(crate) use acceptance::*;
 pub(crate) use admission::*;
 
+use ofd_core::SizeMm;
+
 /// Identity of one whole-page raster request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct PageRequest {
@@ -23,16 +25,18 @@ impl PageRequest {
     }
 }
 
-/// Whether a cache holding `len` entries and `bytes` pixels must evict one
-/// more entry. The visible page and the frame that was just produced are
-/// protected by the caller.
-pub(crate) fn cache_over_budget(
-    len: usize,
-    count_limit: usize,
-    bytes: usize,
-    byte_limit: usize,
-) -> bool {
-    len > count_limit || bytes > byte_limit
+/// Bytes a whole-page bitmap needs at `dpi` after `rotation`. Rounded up by
+/// one pixel per side, matching how the rasterizer sizes its output, so the
+/// reservation is never smaller than the real allocation.
+pub(crate) fn page_raster_estimate(size: SizeMm, dpi: u32, rotation: u8) -> usize {
+    let (width, height) = if rotation % 2 == 1 {
+        (size.height, size.width)
+    } else {
+        (size.width, size.height)
+    };
+    let side = |mm: f64| (mm * f64::from(dpi) / 25.4).ceil() as u64 + 1;
+    let pixels = side(width).saturating_mul(side(height));
+    pixels.saturating_mul(4).min(usize::MAX as u64) as usize
 }
 
 /// One neighbour prefetch candidate: the page, its density and the resident
@@ -141,12 +145,5 @@ mod tests {
         assert_eq!(chosen[0].page, 1);
         // No room at all.
         assert!(prefetch_plan(100, 8, 7, 100, &candidates).is_empty());
-    }
-
-    #[test]
-    fn cache_evicts_on_either_the_count_or_the_byte_limit() {
-        assert!(!cache_over_budget(8, 8, 100, 100));
-        assert!(cache_over_budget(9, 8, 100, 100));
-        assert!(cache_over_budget(8, 8, 101, 100));
     }
 }

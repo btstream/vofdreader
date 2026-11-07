@@ -52,6 +52,17 @@ impl ReaderApp {
         )
     }
 
+    /// Applies new cache limits to the live reader. Bitmap accounting takes
+    /// effect immediately; caches above the new limits are trimmed by the next
+    /// eviction or by an explicit re-render request.
+    pub(crate) fn apply_cache_config(&mut self, config: cache_config::CacheConfig) {
+        self.cache_config = config;
+        self.raster
+            .set_budget_limits(app::memory_budget::BudgetLimits::split(
+                config.total_bytes(),
+            ));
+    }
+
     /// Upgrades the bitmap only after the zoom/resize has settled, and only
     /// when the new density is higher. Avoids a render per resize frame and
     /// never re-rasterizes a page that is merely being shown smaller.
@@ -164,6 +175,35 @@ impl ReaderApp {
             render_policy::SinglePagePlan::Render { .. } => {}
         }
 
+        // Reserve the pixels before rasterizing, so a page that cannot fit is
+        // reported instead of being rendered and then dropped.
+        let estimate = render_policy::page_raster_estimate(
+            self.active
+                .page_sizes
+                .get(page)
+                .copied()
+                .unwrap_or(SizeMm::new(210.0, 297.0)),
+            dpi,
+            self.rotation,
+        );
+        let reservation = match self.raster.reserve(estimate) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.active.loading = false;
+                self.active.error = Some(
+                    render_policy::reservation_reason(render_policy::ReservationGate {
+                        exceeds_pool: error
+                            == crate::app::memory_budget::BudgetRefusal::ExceedsPool,
+                        pool_full: error == crate::app::memory_budget::BudgetRefusal::NoReserveRoom,
+                    })
+                    .unwrap_or("无法为页面预留内存")
+                    .to_string(),
+                );
+                cx.notify();
+                return;
+            }
+        };
+
         self.raster.render_seq = self.raster.render_seq.wrapping_add(1);
         let request = render_policy::PageRequest {
             seq: self.raster.render_seq,
@@ -176,7 +216,7 @@ impl ReaderApp {
         let ticket = self
             .raster
             .tasks
-            .start(TaskTarget::page(page, dpi), 0, epoch);
+            .start(TaskTarget::page(page, dpi), estimate, epoch);
         let rotation = self.rotation;
 
         cx.spawn(async move |this, cx| {
@@ -204,6 +244,7 @@ impl ReaderApp {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.raster.tasks.finish(ticket);
+                        this.raster.finish_reservation(reservation, &image, bytes);
                         let acceptance =
                             render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
                                 job: epoch,
@@ -245,6 +286,8 @@ impl ReaderApp {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
+                        this.raster.tasks.finish(ticket);
+                        this.raster.cancel_reservation(reservation);
                         let acceptance =
                             render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
                                 job: epoch,
@@ -257,7 +300,6 @@ impl ReaderApp {
                                 displayed_dpi: this.raster.image_dpi,
                                 in_horizon: true,
                             });
-                        this.raster.tasks.finish(ticket);
                         if !acceptance.is_current() || !request.is_latest(this.raster.latest_render)
                         {
                             return;
@@ -428,7 +470,10 @@ impl ReaderApp {
                 .keys()
                 .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi),
             already_failed: self.raster.continuous_failed.contains(&(page, dpi)),
-            already_in_flight: self.raster.tasks.contains(target),
+            already_in_flight: self
+                .raster
+                .tasks
+                .contains_current(target, self.render_epoch()),
         };
         if !render_policy::may_request_cached_page(admission) {
             return;
@@ -439,8 +484,23 @@ impl ReaderApp {
         let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
+        // Continuous and prefetch pages are admitted only when their pixels can
+        // be reserved; otherwise the plan stops instead of queueing work that
+        // would be discarded on completion.
+        let estimate = render_policy::page_raster_estimate(
+            self.active
+                .page_sizes
+                .get(page)
+                .copied()
+                .unwrap_or(SizeMm::new(210.0, 297.0)),
+            dpi,
+            self.rotation,
+        );
+        let Ok(reservation) = self.raster.reserve(estimate) else {
+            return;
+        };
         let epoch = self.render_epoch();
-        let ticket = self.raster.tasks.start(target, 0, epoch);
+        let ticket = self.raster.tasks.start(target, estimate, epoch);
         let rotation = self.rotation;
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -460,6 +520,12 @@ impl ReaderApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.raster.tasks.finish(ticket);
+                match &result {
+                    Ok((image, bytes)) => {
+                        this.raster.finish_reservation(reservation, image, *bytes);
+                    }
+                    Err(_) => this.raster.cancel_reservation(reservation),
+                }
                 let acceptance =
                     render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
                         job: epoch,
@@ -551,7 +617,28 @@ impl ReaderApp {
         self.raster.tasks.len()
     }
 
+    /// Diagnostic line for the accounted bitmap pools. Printed only when the
+    /// diagnostics flag is on, and only from callers that already run per
+    /// frame; it does not start any work or timer.
+    pub(crate) fn budget_diagnostic(&self) -> String {
+        let usage = self.raster.budget.usage();
+        let limits = self.cache_config;
+        format!(
+            "[budget] resident={:.1}MiB reserved_in_flight={:.1}MiB page_cache={:.1}MiB tiles={:.1}MiB jobs={} limit_resident={:.1}MiB limit_in_flight={:.1}MiB",
+            usage.resident_bytes as f64 / 1048576.0,
+            usage.reserved_bytes as f64 / 1048576.0,
+            self.raster.page_cache_bytes as f64 / 1048576.0,
+            self.raster.tile_bytes as f64 / 1048576.0,
+            self.raster.tasks.len(),
+            limits.total_bytes() as f64 / 1048576.0,
+            (limits.total_bytes() / 4) as f64 / 1048576.0,
+        )
+    }
+
     pub(crate) fn sync_gpu_resources(&mut self, window: &mut Window) {
+        if self.gpu.borrow().options.diagnostics {
+            eprintln!("{}", self.budget_diagnostic());
+        }
         let mut live: HashSet<_> = self
             .raster
             .page_cache

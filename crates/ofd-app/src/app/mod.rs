@@ -1,6 +1,7 @@
 pub(crate) mod actions;
 pub(crate) mod active_document;
 pub(crate) mod document;
+pub(crate) mod memory_budget;
 pub(crate) mod navigation;
 pub(crate) mod raster_state;
 pub(crate) mod reading;

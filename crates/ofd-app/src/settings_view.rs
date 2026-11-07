@@ -622,22 +622,26 @@ impl ReaderApp {
             SettingsAction::AdjustPageLimit(delta) => {
                 let value = self.settings.performance.page_limit as i32 + delta;
                 self.settings.performance.page_limit = value.clamp(4, 256) as usize;
-                self.cache_config = crate::settings_cache_config(&self.settings);
+                let config = crate::settings_cache_config(&self.settings);
+                self.apply_cache_config(config);
             }
             SettingsAction::AdjustParsedLimit(delta) => {
                 let value = self.settings.performance.parsed_page_limit as i32 + delta;
                 self.settings.performance.parsed_page_limit = value.clamp(1, 64) as usize;
-                self.cache_config = crate::settings_cache_config(&self.settings);
+                let config = crate::settings_cache_config(&self.settings);
+                self.apply_cache_config(config);
             }
             SettingsAction::AdjustPrefetchPages(delta) => {
                 let value = self.settings.performance.prefetch_pages as i32 + delta;
                 self.settings.performance.prefetch_pages = value.clamp(0, 4) as usize;
-                self.cache_config = crate::settings_cache_config(&self.settings);
+                let config = crate::settings_cache_config(&self.settings);
+                self.apply_cache_config(config);
             }
             SettingsAction::AdjustTileRing(delta) => {
                 let value = self.settings.performance.tile_ring as i32 + delta;
                 self.settings.performance.tile_ring = value.clamp(0, 2) as u32;
-                self.cache_config = crate::settings_cache_config(&self.settings);
+                let config = crate::settings_cache_config(&self.settings);
+                self.apply_cache_config(config);
             }
             SettingsAction::AdjustRenderThreads(delta) => {
                 // 0 (automatic) sits below 1; manual values stop at the cores.
@@ -682,7 +686,8 @@ impl ReaderApp {
                 self.sidebar_open = self.settings.appearance.sidebar_open;
                 self.bar_visible = false;
                 self.apply_gpu_setting_flags();
-                self.cache_config = crate::settings_cache_config(&self.settings);
+                let config = crate::settings_cache_config(&self.settings);
+                self.apply_cache_config(config);
                 let cache_mib = self.settings.performance.cache_mib;
                 self.cache_slider.update(cx, |state, cx| {
                     state.set_value(cache_mib as f32, window, cx);

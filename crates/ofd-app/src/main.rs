@@ -155,7 +155,8 @@ impl ReaderApp {
             };
             this.settings.performance.cache_mib =
                 (value.round() as usize).clamp(settings::CACHE_MIN_MIB, settings::CACHE_MAX_MIB);
-            this.cache_config = settings_cache_config(&this.settings);
+            let config = settings_cache_config(&this.settings);
+            this.apply_cache_config(config);
             if persist {
                 this.settings.save();
             }
@@ -323,7 +324,9 @@ impl ReaderApp {
             last_scroll_y: 0.0,
             scroll_down: true,
             continuous_settle_pending: false,
-            raster: app::raster_state::RasterState::new(),
+            raster: app::raster_state::RasterState::with_budget(
+                app::memory_budget::BudgetLimits::split(cache_config.total_bytes()),
+            ),
             cache_config,
             gpu: Rc::new(RefCell::new(gpu::Resources::new(gpu_options))),
             tile_slots: tiles::concurrency(settings.performance.render_threads),

@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::app::render_policy::{PageRequest, cache_over_budget};
+use crate::app::memory_budget::{BitmapId, BudgetLedger, BudgetLimits, BudgetRefusal, Reservation};
+use crate::app::render_policy::PageRequest;
 use crate::app::task_state::InFlightTasks;
 use crate::tiles;
 use gpui_kit::RenderImage;
@@ -39,6 +40,9 @@ pub(crate) struct RasterState {
     pub(crate) continuous_failed: HashSet<(usize, u32)>,
     /// Raster jobs currently occupying a worker slot.
     pub(crate) tasks: InFlightTasks,
+    /// Bitmap accounting shared by the caches, the on-screen slot and the
+    /// jobs that are still rendering.
+    pub(crate) budget: BudgetLedger,
 }
 
 /// Limits and protected entries for one page-cache insertion.
@@ -52,7 +56,8 @@ pub(crate) struct PageEviction {
 }
 
 impl RasterState {
-    pub(crate) fn new() -> Self {
+    /// Builds a state whose ledger starts with the user's cache setting.
+    pub(crate) fn with_budget(limits: BudgetLimits) -> Self {
         Self {
             page_image: None,
             image_dpi: 0,
@@ -72,11 +77,52 @@ impl RasterState {
             dpi_debounce_gen: 0,
             continuous_failed: HashSet::new(),
             tasks: InFlightTasks::new(),
+            budget: BudgetLedger::new(limits),
         }
     }
 
-    /// Drops caches and in-flight bookkeeping but keeps the displayed bitmap.
-    /// Used when the same page must be re-rendered (rotation, image filter).
+    /// Applies new bitmap limits. Existing entries are kept, so the caller can
+    /// observe and then release whatever is now over budget.
+    pub(crate) fn set_budget_limits(&mut self, limits: BudgetLimits) {
+        self.budget.set_limits(limits);
+    }
+
+    /// Bitmap identity used by the ledger. GPUI keeps one atlas entry per
+    /// `ImageId`, so the same allocation is charged once even when the cache,
+    /// the on-screen slot and the image registry all reference it.
+    fn bitmap_id(image: &RenderImage) -> BitmapId {
+        BitmapId(image.id.0 as u64)
+    }
+
+    /// Reserves the pixels a job will produce before it starts. The caller
+    /// must hand the reservation back with [`Self::finish_reservation`] or
+    /// [`Self::cancel_reservation`] when the closure returns.
+    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
+        self.budget.reserve(bytes)
+    }
+
+    pub(crate) fn cancel_reservation(&mut self, reservation: Reservation) {
+        self.budget.cancel(reservation);
+    }
+
+    /// Settles a finished job. Returns whether the pixels were kept.
+    pub(crate) fn finish_reservation(
+        &mut self,
+        reservation: Reservation,
+        image: &RenderImage,
+        actual_bytes: usize,
+    ) -> bool {
+        self.budget
+            .finish(reservation, Self::bitmap_id(image), actual_bytes)
+    }
+
+    /// Drops caches and marks in-flight results stale, while keeping the
+    /// displayed bitmap.
+    ///
+    /// Running jobs stay in [`Self::tasks`]: their worker slots and pixel
+    /// buffers are still in use until the closure returns. Removing them here
+    /// would make the budget believe memory had been freed and allow work that
+    /// cannot actually run in parallel.
     pub(crate) fn invalidate(&mut self) {
         self.view_generation = self.view_generation.wrapping_add(1);
         self.render_seq = self.render_seq.wrapping_add(1);
@@ -87,7 +133,6 @@ impl RasterState {
         self.page_cache_bytes = 0;
         self.clear_tiles();
         self.continuous_failed.clear();
-        self.tasks.clear();
     }
 
     /// Returns to the empty state when a document is closed or replaced.
@@ -137,6 +182,10 @@ impl RasterState {
 
     /// Keeps decoded pages in memory within a byte budget. The displayed page
     /// is never evicted by the request that produced it.
+    ///
+    /// Returns whether the pixels were admitted by the ledger. A refused frame
+    /// must not be kept: retaining it would break the budget the caller was
+    /// told about.
     pub(crate) fn cache_page(
         &mut self,
         page: usize,
@@ -144,7 +193,7 @@ impl RasterState {
         image: Arc<RenderImage>,
         bytes: usize,
         eviction: PageEviction,
-    ) {
+    ) -> bool {
         let key = (page, dpi);
         // A sharper bitmap subsumes older densities; retaining both can make
         // a visible working set exceed its budget during zoom refinement.
@@ -157,24 +206,55 @@ impl RasterState {
         for old_key in obsolete {
             self.remove_page(old_key);
         }
-        if let Some(old) = self.page_cache.insert(key, image) {
-            self.page_cache_bytes = self.page_cache_bytes.saturating_sub(image_bytes(&old));
-        }
-        self.page_cache_bytes = self.page_cache_bytes.saturating_add(bytes);
-        self.touch_page(page, dpi);
 
+        let bitmap = Self::bitmap_id(&image);
+        // Nothing is charged until the languages accept: make room first, then
+        // admit, so a rejected frame leaves no residue.
+        self.evict_until_admissible(bitmap, bytes, &eviction, key);
+        if !self.budget.admit(bitmap, bytes) {
+            return false;
+        }
+
+        if let Some(old) = self.page_cache.insert(key, image) {
+            let old_id = Self::bitmap_id(&old);
+            if !self.page_cache.values().any(|kept| kept.id == old.id)
+                && self
+                    .page_image
+                    .as_ref()
+                    .is_none_or(|shown| shown.id != old.id)
+            {
+                self.budget.release(old_id);
+            }
+        }
+        self.page_cache_bytes = self
+            .page_cache
+            .values()
+            .map(|image| image_bytes(image))
+            .sum();
+        self.touch_page(page, dpi);
+        true
+    }
+
+    /// Evicts cache entries that are not protected until the new bitmap fits
+    /// both the count/byte limits and the ledger. The new frame is not in the
+    /// cache yet, so its own size is added to the comparison.
+    fn evict_until_admissible(
+        &mut self,
+        bitmap: BitmapId,
+        bytes: usize,
+        eviction: &PageEviction,
+        key: (usize, u32),
+    ) {
         let protected = eviction.protected;
-        let on_screen = eviction.on_screen;
-        // Pages on screen are never evicted, even when they alone exceed the
-        // budget; otherwise two large visible pages evict each other forever.
-        while self.page_cache.len() > 1
-            && cache_over_budget(
-                self.page_cache.len(),
-                eviction.count_limit,
-                self.page_cache_bytes,
-                eviction.byte_limit,
-            )
-        {
+        let on_screen = eviction.on_screen.clone();
+        let over_limits = |state: &Self| {
+            state.page_cache.len() + 1 > eviction.count_limit
+                || state.page_cache_bytes + bytes > eviction.byte_limit
+        };
+        while self.budget.can_admit(bitmap, bytes).is_err() || over_limits(self) {
+            if self.page_cache.is_empty() {
+                break;
+            }
             let Some(oldest) = self.page_cache_order.pop_front() else {
                 break;
             };
@@ -183,7 +263,6 @@ impl RasterState {
             };
             if keep(&oldest) {
                 self.page_cache_order.push_back(oldest);
-                // Only protected entries are left; stop instead of spinning.
                 if self.page_cache_order.iter().all(keep) {
                     break;
                 }
@@ -195,12 +274,30 @@ impl RasterState {
 
     fn remove_page(&mut self, key: (usize, u32)) {
         if let Some(old) = self.page_cache.remove(&key) {
-            self.page_cache_bytes = self.page_cache_bytes.saturating_sub(image_bytes(&old));
+            self.page_cache_bytes = self
+                .page_cache
+                .values()
+                .map(|image| image_bytes(image))
+                .sum();
+            let still_owned = self
+                .page_image
+                .as_ref()
+                .is_some_and(|shown| shown.id == old.id)
+                || self.tile_cache.values().any(|tile| tile.id == old.id)
+                || self.page_cache.values().any(|kept| kept.id == old.id);
+            if !still_owned {
+                self.budget.release(Self::bitmap_id(&old));
+            }
         }
         self.page_cache_order.retain(|existing| *existing != key);
     }
 
     pub(crate) fn clear_tiles(&mut self) {
+        let released: Vec<_> = self
+            .tile_cache
+            .values()
+            .map(|image| Self::bitmap_id(image))
+            .collect();
         self.tile_cache.clear();
         self.tile_order.clear();
         self.tile_wanted.clear();
@@ -208,10 +305,34 @@ impl RasterState {
         self.tile_failed.clear();
         self.tile_bytes = 0;
         // An old document's tasks keep their slots until they return.
+        for id in released {
+            self.release_if_unreferenced(id);
+        }
+    }
+
+    /// Releases a ledger entry only when no cache or on-screen slot still
+    /// holds the same allocation.
+    fn release_if_unreferenced(&mut self, id: BitmapId) {
+        let referenced = self
+            .page_cache
+            .values()
+            .any(|image| Self::bitmap_id(image) == id)
+            || self
+                .page_image
+                .as_ref()
+                .is_some_and(|image| Self::bitmap_id(image) == id)
+            || self
+                .tile_cache
+                .values()
+                .any(|image| Self::bitmap_id(image) == id);
+        if !referenced {
+            self.budget.release(id);
+        }
     }
 
     /// Inserts a finished tile, evicting least-recently used entries that are
-    /// not protected by the current request plan. Returns whether it fit.
+    /// not protected by the current request plan. Returns whether it fit both
+    /// the caller's byte limit and the shared ledger.
     pub(crate) fn cache_tile(
         &mut self,
         key: tiles::Key,
@@ -220,7 +341,8 @@ impl RasterState {
         limit: usize,
         protected: &[tiles::Key],
     ) -> bool {
-        while self.tile_bytes + bytes > limit {
+        let bitmap = Self::bitmap_id(&image);
+        while self.tile_bytes + bytes > limit || self.budget.can_admit(bitmap, bytes).is_err() {
             let Some(position) = self
                 .tile_order
                 .iter()
@@ -230,15 +352,24 @@ impl RasterState {
             };
             let old = self.tile_order.remove(position).expect("index is valid");
             if let Some(image) = self.tile_cache.remove(&old) {
-                self.tile_bytes = self.tile_bytes.saturating_sub(image_bytes(&image));
+                self.tile_bytes = self
+                    .tile_cache
+                    .values()
+                    .map(|image| image_bytes(image))
+                    .sum();
+                self.release_if_unreferenced(Self::bitmap_id(&image));
             }
         }
-        if self.tile_bytes + bytes > limit {
+        if self.tile_bytes + bytes > limit || !self.budget.admit(bitmap, bytes) {
             return false;
         }
         self.tile_cache.insert(key, image);
         self.tile_order.push_back(key);
-        self.tile_bytes += bytes;
+        self.tile_bytes = self
+            .tile_cache
+            .values()
+            .map(|image| image_bytes(image))
+            .sum();
         true
     }
 }
@@ -273,7 +404,7 @@ mod tests {
 
     #[test]
     fn page_cache_never_evicts_the_bitmap_that_produced_the_insert() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         state.cache_page(0, 96, render_image(1, 1), 0, eviction((0, 96)));
         // A second insertion is over both limits, but the new entry is
         // protected; the older one is evicted instead.
@@ -284,7 +415,7 @@ mod tests {
 
     #[test]
     fn on_screen_pages_survive_a_tight_budget() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         let eviction = || PageEviction {
             count_limit: 1,
             byte_limit: 4,
@@ -299,7 +430,7 @@ mod tests {
 
     #[test]
     fn sharper_pages_replace_lower_densities() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         let eviction = |page| PageEviction {
             count_limit: 8,
             byte_limit: 1 << 20,
@@ -314,7 +445,7 @@ mod tests {
 
     #[test]
     fn invalidate_keeps_the_visible_bitmap_until_its_replacement() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         state.page_image = Some(render_image(2, 2));
         state.image_dpi = 192;
         state.cache_page(
@@ -337,7 +468,7 @@ mod tests {
 
     #[test]
     fn reset_drops_the_visible_bitmap_and_invalidates_pending_debounce() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         state.page_image = Some(render_image(1, 1));
         state.image_dpi = 96;
         let debounce = state.dpi_debounce_gen;
@@ -348,7 +479,7 @@ mod tests {
 
     #[test]
     fn tiles_evict_unprotected_entries_but_reject_an_oversized_insert() {
-        let mut state = RasterState::new();
+        let mut state = RasterState::with_budget(BudgetLimits::split(4));
         let key = |x| tiles::Key {
             page: 0,
             dpi: 96,
