@@ -6,17 +6,7 @@ impl ReaderApp {
     /// This does not touch `ActiveDocument` metadata or the GPU registry: the
     /// caller owns those because dropping atlas entries needs a `Window`.
     pub(crate) fn reset_raster_state(&mut self) {
-        self.view_generation = self.view_generation.wrapping_add(1);
-        self.render_seq = self.render_seq.wrapping_add(1);
-        self.latest_render = None;
-        self.page_image = None;
-        self.image_dpi = 0;
-        self.page_cache.clear();
-        self.page_cache_order.clear();
-        self.page_cache_bytes = 0;
-        self.clear_tiles();
-        self.continuous_pending.clear();
-        self.continuous_failed.clear();
+        self.raster.reset();
         self.continuous_last_scroll = None;
         self.continuous_settle_pending = false;
         self.continuous_scroll.set_offset(point(px(0.0), px(0.0)));

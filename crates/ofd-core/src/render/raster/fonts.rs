@@ -1,4 +1,10 @@
-use super::*;
+use std::sync::Arc;
+
+use resvg::tiny_skia as sk;
+use resvg::usvg::fontdb;
+
+/// A system-font outline in font units, with that face's units per em.
+pub(crate) type SystemGlyph = Option<(Arc<sk::Path>, f32)>;
 
 fn face_has_char(db: &fontdb::Database, id: fontdb::ID, ch: char) -> bool {
     db.with_face_data(id, |data, index| {

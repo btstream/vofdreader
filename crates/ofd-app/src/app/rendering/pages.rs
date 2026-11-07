@@ -49,23 +49,23 @@ impl ReaderApp {
     pub(crate) fn schedule_dpi_render(&mut self, cx: &mut Context<Self>) {
         // Every change bumps the generation; only the timer that observes the
         // newest generation may start a render. A running timer is reused.
-        self.dpi_debounce_gen = self.dpi_debounce_gen.wrapping_add(1);
-        if self.dpi_pending {
+        self.raster.dpi_debounce_gen = self.raster.dpi_debounce_gen.wrapping_add(1);
+        if self.raster.dpi_pending {
             return;
         }
-        self.dpi_pending = true;
-        let generation = self.dpi_debounce_gen;
+        self.raster.dpi_pending = true;
+        let generation = self.raster.dpi_debounce_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.dpi_pending = false;
-                if this.dpi_debounce_gen != generation {
+                this.raster.dpi_pending = false;
+                if this.raster.dpi_debounce_gen != generation {
                     return;
                 }
                 match this.view_mode {
-                    ViewMode::Single if this.target_dpi() > this.image_dpi => {
+                    ViewMode::Single if this.target_dpi() > this.raster.image_dpi => {
                         this.request_page_render(cx);
                     }
                     ViewMode::Continuous => this.ensure_continuous_pages(this.viewport, cx),
@@ -96,11 +96,11 @@ impl ReaderApp {
         // Prefer an exact bitmap, otherwise reuse any sharper one. A larger
         // bitmap shown smaller stays crisp and avoids a redundant render.
         if let Some((cached_dpi, image)) = self.cached_page_image(page, dpi) {
-            self.page_image = Some(image);
-            self.image_dpi = cached_dpi;
+            self.raster.page_image = Some(image);
+            self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
             self.active.error = None;
-            self.latest_render = None;
+            self.raster.latest_render = None;
             return;
         }
 
@@ -108,8 +108,9 @@ impl ReaderApp {
         // rasterize only the final uncached page after the gesture settles.
         // Neighbour prefetch is deliberately low-DPI. Display it immediately
         // on navigation, then refine instead of ignoring a useful cached frame.
-        if self.page_image.is_none()
+        if self.raster.page_image.is_none()
             && let Some(preview_dpi) = self
+                .raster
                 .page_cache
                 .keys()
                 .filter(|(cached_page, _)| *cached_page == page)
@@ -117,33 +118,37 @@ impl ReaderApp {
                 .max()
             && let Some((cached_dpi, image)) = self.cached_page_image(page, preview_dpi)
         {
-            self.page_image = Some(image);
-            self.image_dpi = cached_dpi;
+            self.raster.page_image = Some(image);
+            self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
         }
-        if self.continuous_scrolling() || self.tile_busy() || !self.continuous_pending.is_empty() {
+        if self.continuous_scrolling()
+            || self.tile_busy()
+            || !self.raster.continuous_pending.is_empty()
+        {
             return;
         }
 
         // Coalesce an identical in-flight request (e.g. several frames asking
         // for the same density while a render is running).
         if self
+            .raster
             .latest_render
             .is_some_and(|pending| pending.page == page && pending.dpi == dpi)
         {
             return;
         }
 
-        self.render_seq = self.render_seq.wrapping_add(1);
+        self.raster.render_seq = self.raster.render_seq.wrapping_add(1);
         let request = render_policy::PageRequest {
-            seq: self.render_seq,
+            seq: self.raster.render_seq,
             page,
             dpi,
         };
-        self.latest_render = Some(request);
-        self.active.loading = self.page_image.is_none();
+        self.raster.latest_render = Some(request);
+        self.active.loading = self.raster.page_image.is_none();
         let generation = self.active.generation;
-        let view_generation = self.view_generation;
+        let view_generation = self.raster.view_generation;
         let rotation = self.rotation;
 
         cx.spawn(async move |this, cx| {
@@ -174,24 +179,24 @@ impl ReaderApp {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.active.generation != generation
-                            || this.view_generation != view_generation
+                            || this.raster.view_generation != view_generation
                         {
                             return;
                         }
                         this.cache_page_image(page, dpi, image.clone(), bytes);
                         this.active.font_reports.insert(page, font_report);
-                        if !request.is_latest(this.latest_render) {
+                        if !request.is_latest(this.raster.latest_render) {
                             return;
                         }
-                        this.latest_render = None;
+                        this.raster.latest_render = None;
                         this.active.loading = false;
                         if request.replaces_visible(
                             this.page,
-                            this.image_dpi,
-                            this.page_image.is_some(),
+                            this.raster.image_dpi,
+                            this.raster.page_image.is_some(),
                         ) {
-                            this.page_image = Some(image);
-                            this.image_dpi = dpi;
+                            this.raster.page_image = Some(image);
+                            this.raster.image_dpi = dpi;
                             this.active.error = None;
                         }
                         // Start thumbnails only after the main page is on
@@ -207,15 +212,15 @@ impl ReaderApp {
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.active.generation != generation
-                            || this.view_generation != view_generation
+                            || this.raster.view_generation != view_generation
                         {
                             return;
                         }
-                        let is_latest = request.is_latest(this.latest_render);
+                        let is_latest = request.is_latest(this.raster.latest_render);
                         if !is_latest {
                             return;
                         }
-                        this.latest_render = None;
+                        this.raster.latest_render = None;
                         this.active.loading = false;
                         this.active.error = Some(format!("页面渲染失败：{error}"));
                         cx.notify();
@@ -233,37 +238,16 @@ impl ReaderApp {
         page: usize,
         target_dpi: u32,
     ) -> Option<(u32, Arc<RenderImage>)> {
-        if let Some(image) = self.page_cache.get(&(page, target_dpi)).cloned() {
-            self.touch_cached_page(page, target_dpi);
-            return Some((target_dpi, image));
-        }
-        let sharper = self
-            .page_cache
-            .iter()
-            .filter(|((cached_page, dpi), _)| *cached_page == page && *dpi > target_dpi)
-            .map(|((_, dpi), _)| *dpi)
-            .min()?;
-        let image = self.page_cache.get(&(page, sharper)).cloned()?;
-        self.touch_cached_page(page, sharper);
-        Some((sharper, image))
+        self.raster.cached_page(page, target_dpi)
     }
 
     /// Bytes of the cached page bitmaps whose key matches.
     pub(crate) fn cached_page_bytes(&self, matches: impl Fn((usize, u32)) -> bool) -> usize {
-        self.page_cache
-            .iter()
-            .filter(|(key, _)| matches(**key))
-            .map(|(_, image)| {
-                let size = image.size(0);
-                size.width.to_bytes(4) as usize * size.height.0 as usize
-            })
-            .sum()
+        self.raster.page_bytes_matching(matches)
     }
 
     pub(crate) fn touch_cached_page(&mut self, page: usize, dpi: u32) {
-        let key = (page, dpi);
-        self.page_cache_order.retain(|existing| *existing != key);
-        self.page_cache_order.push_back(key);
+        self.raster.touch_page(page, dpi);
     }
 
     /// Keeps decoded pages in memory within a byte budget. The displayed page
@@ -276,77 +260,25 @@ impl ReaderApp {
         bytes: usize,
     ) {
         self.gpu.borrow_mut().register(image.clone());
-        let key = (page, dpi);
-        // A sharper bitmap subsumes older densities; retaining both can make
-        // a visible working set exceed its budget during zoom refinement.
-        let obsolete: Vec<_> = self
-            .page_cache
-            .keys()
-            .filter(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi < dpi)
-            .copied()
-            .collect();
-        for old_key in obsolete {
-            if let Some(old) = self.page_cache.remove(&old_key) {
-                let size = old.size(0);
-                self.page_cache_bytes = self
-                    .page_cache_bytes
-                    .saturating_sub(size.width.to_bytes(4) as usize * size.height.0 as usize);
-            }
-            self.page_cache_order.retain(|key| *key != old_key);
-        }
-        if let Some(old) = self.page_cache.insert(key, image) {
-            let size = old.size(0);
-            self.page_cache_bytes = self
-                .page_cache_bytes
-                .saturating_sub(size.width.to_bytes(4) as usize * size.height.0 as usize);
-        }
-        self.page_cache_bytes = self.page_cache_bytes.saturating_add(bytes);
-        self.touch_cached_page(page, dpi);
-
-        let protected = (self.page, self.image_dpi);
         // Pages on screen are never evicted, even when they alone exceed the
         // budget; otherwise two large visible pages evict each other forever.
-        let on_screen = if self.view_mode == ViewMode::Continuous {
-            self.continuous_content_range(self.viewport)
-        } else {
-            0..0
-        };
-        let count_limit = if self.view_mode == ViewMode::Continuous {
-            self.cache_config
-                .page_limit()
-                .max(self.continuous_visible_range(self.viewport).len())
-        } else {
-            self.cache_config.page_limit()
-        };
-        while self.page_cache.len() > 1
-            && render_policy::cache_over_budget(
-                self.page_cache.len(),
-                count_limit,
-                self.page_cache_bytes,
-                self.cache_config.page_bytes(),
+        let (on_screen, count_limit) = if self.view_mode == ViewMode::Continuous {
+            (
+                self.continuous_content_range(self.viewport),
+                self.cache_config
+                    .page_limit()
+                    .max(self.continuous_visible_range(self.viewport).len()),
             )
-        {
-            let Some(oldest) = self.page_cache_order.pop_front() else {
-                break;
-            };
-            let keep = |entry: &(usize, u32)| {
-                *entry == key || *entry == protected || on_screen.contains(&entry.0)
-            };
-            if keep(&oldest) {
-                self.page_cache_order.push_back(oldest);
-                // Only protected entries are left; stop instead of spinning.
-                if self.page_cache_order.iter().all(keep) {
-                    break;
-                }
-                continue;
-            }
-            if let Some(old) = self.page_cache.remove(&oldest) {
-                let size = old.size(0);
-                self.page_cache_bytes = self
-                    .page_cache_bytes
-                    .saturating_sub(size.width.to_bytes(4) as usize * size.height.0 as usize);
-            }
-        }
+        } else {
+            (0..0, self.cache_config.page_limit())
+        };
+        let eviction = app::raster_state::PageEviction {
+            count_limit,
+            byte_limit: self.cache_config.page_bytes(),
+            protected: (self.page, self.raster.image_dpi),
+            on_screen,
+        };
+        self.raster.cache_page(page, dpi, image, bytes, eviction);
     }
 
     /// Renders thumbnails one at a time. Rendering them concurrently used to
@@ -375,9 +307,9 @@ impl ReaderApp {
                         }
                         Some(
                             !this.continuous_scrolling()
-                                && this.continuous_pending.is_empty()
+                                && this.raster.continuous_pending.is_empty()
                                 && !this.tile_busy()
-                                && this.latest_render.is_none(),
+                                && this.raster.latest_render.is_none(),
                         )
                     });
                     match ready {
@@ -424,11 +356,12 @@ impl ReaderApp {
     pub(crate) fn request_cached_page(&mut self, page: usize, dpi: u32, cx: &mut Context<Self>) {
         if page >= self.active.page_count()
             || !continuous::render_ready(self.raster_jobs(), self.tile_slots)
-            || self.latest_render.is_some()
+            || self.raster.latest_render.is_some()
         {
             return;
         }
         if self
+            .raster
             .page_cache
             .keys()
             .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi)
@@ -441,13 +374,13 @@ impl ReaderApp {
         let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
-        if self.continuous_failed.contains(&(page, dpi))
-            || !self.continuous_pending.insert((page, dpi))
+        if self.raster.continuous_failed.contains(&(page, dpi))
+            || !self.raster.continuous_pending.insert((page, dpi))
         {
             return;
         }
         let generation = self.active.generation;
-        let view_generation = self.view_generation;
+        let view_generation = self.raster.view_generation;
         let rotation = self.rotation;
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -463,13 +396,13 @@ impl ReaderApp {
                 if this.active.generation != generation {
                     return;
                 }
-                this.continuous_pending.remove(&(page, dpi));
-                if this.view_generation != view_generation {
+                this.raster.continuous_pending.remove(&(page, dpi));
+                if this.raster.view_generation != view_generation {
                     cx.notify();
                     return;
                 }
                 if result.is_err() {
-                    this.continuous_failed.insert((page, dpi));
+                    this.raster.continuous_failed.insert((page, dpi));
                 }
                 // Do not retain a completed frame outside the current visible
                 // and nearby-prefetch horizon. There is one in-flight job.
@@ -490,8 +423,8 @@ impl ReaderApp {
                     }
                 }
                 if this.view_mode == ViewMode::Single
-                    && this.page_image.is_none()
-                    && this.latest_render.is_none()
+                    && this.raster.page_image.is_none()
+                    && this.raster.latest_render.is_none()
                 {
                     this.request_page_render(cx);
                 }
@@ -508,8 +441,12 @@ impl ReaderApp {
         self.sidebar_open
             || self.grid_open
             || (self.page_on_screen(page)
-                && !self.page_cache.keys().any(|(cached, _)| *cached == page)
-                && (self.view_mode == ViewMode::Continuous || self.page_image.is_none()))
+                && !self
+                    .raster
+                    .page_cache
+                    .keys()
+                    .any(|(cached, _)| *cached == page)
+                && (self.view_mode == ViewMode::Continuous || self.raster.page_image.is_none()))
     }
 
     /// Whether a bitmap of `page` is (or is about to be) drawn: the
@@ -539,13 +476,18 @@ impl ReaderApp {
     /// Page and tile raster jobs in flight; together they share the
     /// configured render thread slots.
     pub(crate) fn raster_jobs(&self) -> usize {
-        self.continuous_pending.len() + self.tile_jobs.len()
+        self.raster.continuous_pending.len() + self.raster.tile_jobs.len()
     }
 
     pub(crate) fn sync_gpu_resources(&mut self, window: &mut Window) {
-        let mut live: HashSet<_> = self.page_cache.values().map(|image| image.id).collect();
-        live.extend(self.tile_cache.values().map(|image| image.id));
-        if let Some(image) = &self.page_image {
+        let mut live: HashSet<_> = self
+            .raster
+            .page_cache
+            .values()
+            .map(|image| image.id)
+            .collect();
+        live.extend(self.raster.tile_cache.values().map(|image| image.id));
+        if let Some(image) = &self.raster.page_image {
             live.insert(image.id);
         }
         live.extend(self.active.thumbs.iter().flatten().map(|image| image.id));
@@ -554,6 +496,6 @@ impl ReaderApp {
             .reconcile(&live, |image| window.drop_image(image).is_ok());
         self.gpu
             .borrow_mut()
-            .frame(self.page_cache_bytes + self.tile_bytes);
+            .frame(self.raster.page_cache_bytes + self.raster.tile_bytes);
     }
 }

@@ -1,4 +1,10 @@
-use super::*;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use resvg::tiny_skia as sk;
+
+use super::IMAGE_CACHE_BYTES;
 
 /// Decoded images shared across pages (templates and seals repeat).
 #[derive(Default)]

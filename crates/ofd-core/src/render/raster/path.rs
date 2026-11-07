@@ -1,4 +1,12 @@
-use super::*;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use resvg::tiny_skia as sk;
+
+use super::super::svg::{cap, join};
+use super::super::{Matrix, PathCmd, PathStyle, Shading, ShadingKind, ShadingSpread};
+use super::ops::{Bounds, Op};
+use crate::model::Color;
 
 pub(crate) fn hash_cmd(cmd: &PathCmd, hasher: &mut impl Hasher) {
     let values: &[f64] = match cmd {

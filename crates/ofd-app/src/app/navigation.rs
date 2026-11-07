@@ -21,8 +21,8 @@ impl ReaderApp {
             ViewMode::Single => ViewMode::Continuous,
             ViewMode::Continuous => ViewMode::Single,
         };
-        self.page_image = None;
-        self.image_dpi = 0;
+        self.raster.page_image = None;
+        self.raster.image_dpi = 0;
         self.selection.layout = None;
         self.clear_selection();
         match self.view_mode {
@@ -40,8 +40,8 @@ impl ReaderApp {
             return;
         }
         self.page = page;
-        self.page_image = None;
-        self.image_dpi = 0;
+        self.raster.page_image = None;
+        self.raster.image_dpi = 0;
         self.selection.layout = None;
         self.clear_selection();
         self.refresh_search_highlights();
@@ -170,7 +170,7 @@ impl ReaderApp {
         self.refresh_search_highlights();
         // Cached rasters and in-flight jobs belong to the previous orientation;
         // the old bitmap has the wrong shape, so nothing stays on screen.
-        self.page_image = None;
+        self.raster.page_image = None;
         if self.active.is_open() && self.view_mode == ViewMode::Continuous {
             self.scroll_to_continuous_page(self.viewport, self.page);
         }
@@ -196,19 +196,10 @@ impl ReaderApp {
     /// stays visible until its replacement arrives (`image_dpi = 0` forces
     /// the re-render).
     pub(crate) fn invalidate_rasters(&mut self, cx: &mut Context<Self>) {
-        self.view_generation = self.view_generation.wrapping_add(1);
-        self.render_seq = self.render_seq.wrapping_add(1);
-        self.latest_render = None;
-        self.image_dpi = 0;
-        self.page_cache.clear();
-        self.page_cache_order.clear();
-        self.page_cache_bytes = 0;
-        self.clear_tiles();
-        self.continuous_pending.clear();
-        self.continuous_failed.clear();
+        self.raster.invalidate();
         self.active.loading = self.view_mode == ViewMode::Single
             && self.active.is_open()
-            && self.page_image.is_none();
+            && self.raster.page_image.is_none();
         if self.active.is_open() {
             if self.view_mode == ViewMode::Continuous {
                 self.ensure_continuous_pages(self.viewport, cx);
@@ -236,7 +227,9 @@ impl ReaderApp {
                     self.scroll_to_continuous_page(self.viewport, self.page);
                     self.ensure_continuous_pages(self.viewport, cx);
                 }
-                ViewMode::Single if self.page_image.is_none() => self.request_page_render(cx),
+                ViewMode::Single if self.raster.page_image.is_none() => {
+                    self.request_page_render(cx)
+                }
                 ViewMode::Single => {}
             }
         }

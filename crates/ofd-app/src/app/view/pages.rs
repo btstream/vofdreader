@@ -249,12 +249,13 @@ impl ReaderApp {
                 .map(|(_, image)| image)
                 .or_else(|| {
                     let key = self
+                        .raster
                         .page_cache
                         .keys()
                         .filter(|(page, _)| *page == index)
                         .max_by_key(|(_, dpi)| *dpi)
                         .copied()?;
-                    let image = self.page_cache.get(&key).cloned();
+                    let image = self.raster.page_cache.get(&key).cloned();
                     self.touch_cached_page(key.0, key.1);
                     image
                 });
@@ -314,11 +315,11 @@ impl ReaderApp {
             .get(page)
             .copied()
             .unwrap_or(SizeMm::new(210.0, 297.0));
-        let cache = self.tile_cache.clone();
+        let cache = self.raster.tile_cache.clone();
         let gpu = self.gpu.clone();
         let entity = cx.entity().downgrade();
         let generation = self.active.generation;
-        let view_generation = self.view_generation;
+        let view_generation = self.raster.view_generation;
         let rotation = self.rotation;
         let ring = self.cache_config.prefetch_tile_ring();
         let (rotated_w, rotated_h) = rotate::size(
@@ -355,16 +356,16 @@ impl ReaderApp {
                 cx.defer(move |cx| {
                     let _ = entity.update(cx, |this, _| {
                         if this.active.generation == generation
-                            && this.view_generation == view_generation
+                            && this.raster.view_generation == view_generation
                         {
                             for key in &wanted {
-                                if this.tile_cache.contains_key(key) {
-                                    this.tile_order.retain(|old| old != key);
-                                    this.tile_order.push_back(*key);
+                                if this.raster.tile_cache.contains_key(key) {
+                                    this.raster.tile_order.retain(|old| old != key);
+                                    this.raster.tile_order.push_back(*key);
                                 }
                             }
-                            this.tile_wanted.insert(page, wanted);
-                            this.tile_prefetch.insert(page, nearby);
+                            this.raster.tile_wanted.insert(page, wanted);
+                            this.raster.tile_prefetch.insert(page, nearby);
                         }
                     });
                     // Run after every page has contributed its prepaint plan.
@@ -373,7 +374,7 @@ impl ReaderApp {
                     cx.defer(move |cx| {
                         let _ = entity.update(cx, |this, cx| {
                             if this.active.generation == generation
-                                && this.view_generation == view_generation
+                                && this.raster.view_generation == view_generation
                             {
                                 this.schedule_nearby(cx);
                             }

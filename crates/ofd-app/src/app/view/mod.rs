@@ -22,8 +22,8 @@ impl Render for ReaderApp {
         };
         self.sync_gpu_resources(window);
         self.page_coverage.borrow_mut().clear();
-        self.tile_wanted.clear();
-        self.tile_prefetch.clear();
+        self.raster.tile_wanted.clear();
+        self.raster.tile_prefetch.clear();
         if !self.focused {
             window.focus(&self.focus_handle, cx);
             self.focused = true;
@@ -61,8 +61,8 @@ impl Render for ReaderApp {
             && !self.grid_open
             && self.view_mode == ViewMode::Single
             && !self.active.loading
-            && !self.dpi_pending
-            && self.target_dpi() > self.image_dpi
+            && !self.raster.dpi_pending
+            && self.target_dpi() > self.raster.image_dpi
         {
             self.schedule_dpi_render(cx);
         }
@@ -72,7 +72,7 @@ impl Render for ReaderApp {
         if self.active.is_open()
             && !self.grid_open
             && self.view_mode == ViewMode::Single
-            && self.page_image.is_none()
+            && self.raster.page_image.is_none()
             && !self.active.loading
             && self.active.error.is_none()
             && self.active.renderer.is_some()
@@ -85,7 +85,7 @@ impl Render for ReaderApp {
             self.continuous_view(self.viewport, cx)
         } else {
             let (page_w, page_h) = self.display_size(self.viewport);
-            if let Some(image) = &self.page_image {
+            if let Some(image) = &self.raster.page_image {
                 let bounds_cell = self.page_bounds.clone();
                 let mut stack = div()
                     .relative()
@@ -275,6 +275,7 @@ impl Render for ReaderApp {
         if self.active.loading
             || (self.view_mode == ViewMode::Continuous
                 && self
+                    .raster
                     .continuous_pending
                     .iter()
                     .any(|(page, _)| self.page_on_screen(*page)))

@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -71,35 +71,19 @@ struct ReaderApp {
     sidebar_open: bool,
     page: usize,
     zoom: f32,
-    page_image: Option<Arc<RenderImage>>,
     view_mode: ViewMode,
     continuous_scroll: ScrollHandle,
-    continuous_pending: HashSet<(usize, u32)>,
-    continuous_failed: HashSet<(usize, u32)>,
     continuous_layout: RefCell<continuous::LayoutCache>,
     continuous_last_scroll: Option<Instant>,
     /// Last continuous scroll offset and direction; prefetch goes ahead.
     last_scroll_y: f32,
     scroll_down: bool,
     continuous_settle_pending: bool,
-    page_cache: HashMap<(usize, u32), Arc<RenderImage>>,
-    page_cache_order: VecDeque<(usize, u32)>,
-    page_cache_bytes: usize,
+    raster: app::raster_state::RasterState,
     cache_config: cache_config::CacheConfig,
     gpu: Rc<RefCell<gpu::Resources>>,
-    tile_cache: HashMap<tiles::Key, Arc<RenderImage>>,
-    tile_order: VecDeque<tiles::Key>,
-    tile_bytes: usize,
-    /// In-flight tile jobs and their pixel bytes; at most `tile_slots`.
-    tile_jobs: HashMap<tiles::Key, usize>,
     tile_slots: usize,
-    tile_wanted: HashMap<usize, Vec<tiles::Key>>,
-    tile_prefetch: HashMap<usize, Vec<tiles::Key>>,
-    tile_failed: HashSet<tiles::Key>,
     page_coverage: Rc<RefCell<Vec<Bounds<Pixels>>>>,
-    render_seq: u64,
-    latest_render: Option<app::render_policy::PageRequest>,
-    dpi_debounce_gen: u64,
     search: app::search_state::SearchState,
     page_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selection: app::selection_state::SelectionState,
@@ -112,14 +96,10 @@ struct ReaderApp {
     viewport: Size<Pixels>,
     window_scale: f32,
     ui_font: font_policy::UiFont,
-    image_dpi: u32,
     /// Clockwise quarter turns applied to the view, bitmaps and overlays.
     rotation: u8,
-    /// Invalidates in-flight raster jobs when view orientation changes.
-    view_generation: u64,
     grid_open: bool,
     grid_scroll: ScrollHandle,
-    dpi_pending: bool,
     dark: bool,
     info_dialog_open: bool,
     settings: settings::Settings,
@@ -201,8 +181,8 @@ impl ReaderApp {
                     let ready = this.update(cx, |this, _| {
                         this.active.is_open()
                             && !this.active.loading
-                            && this.latest_render.is_none()
-                            && this.continuous_pending.is_empty()
+                            && this.raster.latest_render.is_none()
+                            && this.raster.continuous_pending.is_empty()
                             && !this.tile_busy()
                             && this.gpu.borrow().stats.page_draws > 0
                             && this
@@ -327,36 +307,21 @@ impl ReaderApp {
             sidebar_open: settings.appearance.sidebar_open,
             page: 0,
             zoom: 1.0,
-            page_image: None,
             view_mode: match settings.reading.default_view {
                 settings::ViewChoice::Single => ViewMode::Single,
                 settings::ViewChoice::Continuous => ViewMode::Continuous,
             },
             continuous_scroll: ScrollHandle::new(),
-            continuous_pending: HashSet::new(),
-            continuous_failed: HashSet::new(),
             continuous_layout: RefCell::new(continuous::LayoutCache::default()),
             continuous_last_scroll: None,
             last_scroll_y: 0.0,
             scroll_down: true,
             continuous_settle_pending: false,
-            page_cache: HashMap::new(),
-            page_cache_order: VecDeque::new(),
-            page_cache_bytes: 0,
+            raster: app::raster_state::RasterState::new(),
             cache_config,
             gpu: Rc::new(RefCell::new(gpu::Resources::new(gpu_options))),
-            tile_cache: HashMap::new(),
-            tile_order: VecDeque::new(),
-            tile_bytes: 0,
-            tile_jobs: HashMap::new(),
             tile_slots: tiles::concurrency(settings.performance.render_threads),
-            tile_wanted: HashMap::new(),
-            tile_prefetch: HashMap::new(),
-            tile_failed: HashSet::new(),
             page_coverage: Rc::new(RefCell::new(Vec::new())),
-            render_seq: 0,
-            latest_render: None,
-            dpi_debounce_gen: 0,
             search: app::search_state::SearchState::new(),
             page_bounds: Rc::new(Cell::new(None)),
             selection: app::selection_state::SelectionState::new(),
@@ -369,12 +334,9 @@ impl ReaderApp {
             viewport,
             window_scale,
             ui_font,
-            image_dpi: 0,
             rotation: 0,
-            view_generation: 0,
             grid_open: false,
             grid_scroll: ScrollHandle::new(),
-            dpi_pending: false,
             dark,
             info_dialog_open: false,
             settings,

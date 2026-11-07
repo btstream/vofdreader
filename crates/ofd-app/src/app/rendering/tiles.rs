@@ -1,16 +1,7 @@
+use crate::app::render_policy;
 use crate::*;
 
 impl ReaderApp {
-    pub(crate) fn clear_tiles(&mut self) {
-        self.tile_cache.clear();
-        self.tile_order.clear();
-        self.tile_wanted.clear();
-        self.tile_prefetch.clear();
-        self.tile_failed.clear();
-        self.tile_bytes = 0;
-        // An old document's tasks keep their slots until they return.
-    }
-
     /// Tiles carry the zoomed-in detail above the whole-page bitmap: they
     /// exist only when the wanted density exceeds the page's base density.
     pub(crate) fn tile_density(&self, page: usize) -> Option<u32> {
@@ -58,8 +49,8 @@ impl ReaderApp {
             || self.active.renderer.is_none()
             || self.grid_open
             || (self.view_mode == ViewMode::Single && self.continuous_scrolling())
-            || self.dpi_pending
-            || self.latest_render.is_some()
+            || self.raster.dpi_pending
+            || self.raster.latest_render.is_some()
             || self.active.loading
         {
             return;
@@ -81,11 +72,7 @@ impl ReaderApp {
             .collect();
         // Pages ahead in the scroll direction first; a page behind counts as
         // twice as far, it was usually just on screen and is still cached.
-        let down = self.scroll_down;
-        pages.sort_by_key(|page| {
-            let ahead = (*page > self.page) == down;
-            (page.abs_diff(self.page) * if ahead { 1 } else { 2 }, !ahead)
-        });
+        pages = render_policy::order_prefetch_pages(pages, self.page, self.scroll_down);
         // Neighbours use the visible pages' density; when memory is short,
         // fewer pages are prefetched instead of blurrier ones. Only the space
         // left after the on-screen pages counts: prefetching more than the
@@ -109,14 +96,13 @@ impl ReaderApp {
                 }
             })
             .sum();
-        let room = self.cache_config.page_bytes().saturating_sub(reserved);
-        let slots = self.cache_config.page_limit().saturating_sub(actual.len());
-        let sizes: Vec<_> = pages
+        let candidates: Vec<_> = pages
             .iter()
             .map(|&page| {
                 let dpi = dpi_of(self, page);
                 // A sharper cached bitmap is what stays resident.
                 let sharpest = self
+                    .raster
                     .page_cache
                     .keys()
                     .filter(|(cached, cached_dpi)| *cached == page && *cached_dpi >= dpi)
@@ -126,12 +112,18 @@ impl ReaderApp {
                     Some(found) => self.cached_page_bytes(|key| key == (page, found)),
                     None => page_raster_bytes(self.active.page_sizes[page], dpi),
                 };
-                (page, dpi, bytes)
+                render_policy::PrefetchCandidate { page, dpi, bytes }
             })
             .collect();
-        let fit = continuous::prefetch_fit(sizes.iter().map(|(_, _, bytes)| *bytes), room, slots);
-        for &(page, dpi, _) in &sizes[..fit] {
-            self.request_cached_page(page, dpi, cx);
+        let plan = render_policy::prefetch_plan(
+            reserved,
+            self.cache_config.page_limit(),
+            actual.len(),
+            self.cache_config.page_bytes(),
+            &candidates,
+        );
+        for candidate in plan {
+            self.request_cached_page(candidate.page, candidate.dpi, cx);
             if !continuous::render_ready(self.raster_jobs(), self.tile_slots) {
                 return;
             }
@@ -140,9 +132,16 @@ impl ReaderApp {
     }
 
     pub(crate) fn tile_requests(&self, include_prefetch: bool) -> Vec<tiles::Key> {
-        let visible: Vec<_> = self.tile_wanted.values().flatten().copied().collect();
+        let visible: Vec<_> = self
+            .raster
+            .tile_wanted
+            .values()
+            .flatten()
+            .copied()
+            .collect();
         let extra = if include_prefetch {
-            self.tile_prefetch
+            self.raster
+                .tile_prefetch
                 .values()
                 .flat_map(|keys| keys.iter().enumerate().map(|(rank, key)| (rank, *key)))
                 .collect()
@@ -153,7 +152,7 @@ impl ReaderApp {
     }
 
     pub(crate) fn tile_busy(&self) -> bool {
-        !self.tile_jobs.is_empty()
+        !self.raster.tile_jobs.is_empty()
     }
 
     /// Start tile jobs in priority order until every slot is used. Tiles of
@@ -171,16 +170,16 @@ impl ReaderApp {
         // Continuous scrolling keeps rendering visible tiles; page and tile
         // jobs share the render slots (see `raster_jobs`).
         if (self.view_mode == ViewMode::Single && self.continuous_scrolling())
-            || self.dpi_pending
-            || self.latest_render.is_some()
+            || self.raster.dpi_pending
+            || self.raster.latest_render.is_some()
         {
             return false;
         }
         let wanted = self.tile_requests(include_prefetch);
         let Some(key) = wanted.iter().copied().find(|key| {
-            !self.tile_cache.contains_key(key)
-                && !self.tile_failed.contains(key)
-                && !self.tile_jobs.contains_key(key)
+            !self.raster.tile_cache.contains_key(key)
+                && !self.raster.tile_failed.contains(key)
+                && !self.raster.tile_jobs.contains_key(key)
         }) else {
             return false;
         };
@@ -202,20 +201,20 @@ impl ReaderApp {
         let bytes = sample.width as usize * sample.height as usize * 4;
         let protected_bytes: usize = wanted
             .iter()
-            .filter_map(|key| self.tile_cache.get(key))
+            .filter_map(|key| self.raster.tile_cache.get(key))
             .map(|image| {
                 let size = image.size(0);
                 size.width.0 as usize * size.height.0 as usize * 4
             })
             .sum();
-        let in_flight: usize = self.tile_jobs.values().sum();
+        let in_flight: usize = self.raster.tile_jobs.values().sum();
         if protected_bytes + in_flight + bytes > self.cache_config.tile_bytes() {
             return false;
         }
         let generation = self.active.generation;
-        let view_generation = self.view_generation;
+        let view_generation = self.raster.view_generation;
         let rotation = self.rotation;
-        self.tile_jobs.insert(key, bytes);
+        self.raster.tile_jobs.insert(key, bytes);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -238,51 +237,42 @@ impl ReaderApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.tile_jobs.remove(&key);
+                this.raster.tile_jobs.remove(&key);
                 if generation == this.active.generation
-                    && view_generation == this.view_generation
+                    && view_generation == this.raster.view_generation
                     && this.tile_requests(true).contains(&key)
                 {
                     match result {
                         Ok((image, bytes)) => {
                             let protected = this.tile_requests(include_prefetch);
-                            while this.tile_bytes + bytes > this.cache_config.tile_bytes() {
-                                let Some(position) = this
-                                    .tile_order
-                                    .iter()
-                                    .position(|old| !protected.contains(old))
-                                else {
-                                    break;
-                                };
-                                let old = this.tile_order.remove(position).unwrap();
-                                if let Some(image) = this.tile_cache.remove(&old) {
-                                    let size = image.size(0);
-                                    this.tile_bytes -=
-                                        size.width.0 as usize * size.height.0 as usize * 4;
-                                }
-                            }
-                            if this.tile_bytes + bytes <= this.cache_config.tile_bytes() {
-                                this.gpu.borrow_mut().register(image.clone());
-                                this.tile_cache.insert(key, image);
-                                this.tile_order.push_back(key);
-                                this.tile_bytes += bytes;
-                            }
+                            this.gpu.borrow_mut().register(image.clone());
+                            this.raster.cache_tile(
+                                key,
+                                image,
+                                bytes,
+                                this.cache_config.tile_bytes(),
+                                &protected,
+                            );
                         }
                         Err(error) => {
-                            this.tile_failed.insert(key);
+                            this.raster.tile_failed.insert(key);
                             eprintln!("[tiles] {key:?}: {error}");
                         }
                     }
                 }
                 // Next frame re-evaluates actual clipping before requesting work.
                 if this.view_mode == ViewMode::Single
-                    && this.page_image.is_none()
-                    && this.latest_render.is_none()
+                    && this.raster.page_image.is_none()
+                    && this.raster.latest_render.is_none()
                 {
                     this.request_page_render(cx);
                 }
                 // Prefetched tiles stay in the cache until they scroll in.
-                let visible = this.tile_wanted.values().any(|keys| keys.contains(&key));
+                let visible = this
+                    .raster
+                    .tile_wanted
+                    .values()
+                    .any(|keys| keys.contains(&key));
                 this.finish_background(visible, cx);
             });
         })
