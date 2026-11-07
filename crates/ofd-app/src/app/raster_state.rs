@@ -10,6 +10,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::app::render_policy::{PageRequest, cache_over_budget};
+use crate::app::task_state::InFlightTasks;
 use crate::tiles;
 use gpui_kit::RenderImage;
 
@@ -24,8 +25,6 @@ pub(crate) struct RasterState {
     pub(crate) tile_cache: HashMap<tiles::Key, Arc<RenderImage>>,
     pub(crate) tile_order: VecDeque<tiles::Key>,
     pub(crate) tile_bytes: usize,
-    /// In-flight tile jobs and their pixel bytes; at most the render slots.
-    pub(crate) tile_jobs: HashMap<tiles::Key, usize>,
     pub(crate) tile_wanted: HashMap<usize, Vec<tiles::Key>>,
     pub(crate) tile_prefetch: HashMap<usize, Vec<tiles::Key>>,
     pub(crate) tile_failed: HashSet<tiles::Key>,
@@ -33,10 +32,13 @@ pub(crate) struct RasterState {
     pub(crate) render_seq: u64,
     /// Invalidates in-flight raster jobs when view orientation changes.
     pub(crate) view_generation: u64,
+    /// Debounce state for single-page density upgrades.
     pub(crate) dpi_pending: bool,
     pub(crate) dpi_debounce_gen: u64,
-    pub(crate) continuous_pending: HashSet<(usize, u32)>,
+    /// Page jobs that failed at this density and must not be retried.
     pub(crate) continuous_failed: HashSet<(usize, u32)>,
+    /// Raster jobs currently occupying a worker slot.
+    pub(crate) tasks: InFlightTasks,
 }
 
 /// Limits and protected entries for one page-cache insertion.
@@ -60,7 +62,6 @@ impl RasterState {
             tile_cache: HashMap::new(),
             tile_order: VecDeque::new(),
             tile_bytes: 0,
-            tile_jobs: HashMap::new(),
             tile_wanted: HashMap::new(),
             tile_prefetch: HashMap::new(),
             tile_failed: HashSet::new(),
@@ -69,8 +70,8 @@ impl RasterState {
             view_generation: 0,
             dpi_pending: false,
             dpi_debounce_gen: 0,
-            continuous_pending: HashSet::new(),
             continuous_failed: HashSet::new(),
+            tasks: InFlightTasks::new(),
         }
     }
 
@@ -85,8 +86,8 @@ impl RasterState {
         self.page_cache_order.clear();
         self.page_cache_bytes = 0;
         self.clear_tiles();
-        self.continuous_pending.clear();
         self.continuous_failed.clear();
+        self.tasks.clear();
     }
 
     /// Returns to the empty state when a document is closed or replaced.

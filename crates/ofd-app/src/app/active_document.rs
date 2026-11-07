@@ -24,6 +24,9 @@ pub(crate) struct ActiveDocument {
     pub(crate) font_reports: HashMap<usize, Arc<ofd_core::FontRenderReport>>,
     pub(crate) thumbs: Vec<Option<Arc<RenderImage>>>,
     pub(crate) thumbs_started: bool,
+    /// Incremented whenever a new thumbnail batch starts, so an older batch
+    /// that is still running cannot overwrite its slots.
+    pub(crate) thumbnail_batch: u64,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
 }
@@ -43,6 +46,7 @@ impl ActiveDocument {
             font_reports: HashMap::new(),
             thumbs: Vec::new(),
             thumbs_started: false,
+            thumbnail_batch: 0,
             loading: false,
             error: None,
         }
@@ -73,6 +77,7 @@ impl ActiveDocument {
         self.font_reports.clear();
         self.thumbs.clear();
         self.thumbs_started = false;
+        self.thumbnail_batch = self.thumbnail_batch.wrapping_add(1);
         self.loading = false;
         self.error = None;
     }
@@ -99,6 +104,7 @@ impl ActiveDocument {
         self.file_size = file_size;
         self.page_sizes = vec![fallback; page_count];
         self.thumbs = vec![None; page_count];
+        self.thumbnail_batch = self.thumbnail_batch.wrapping_add(1);
         self.doc = Some(doc);
         self.loading = true;
     }

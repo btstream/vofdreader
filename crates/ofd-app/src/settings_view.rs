@@ -718,6 +718,8 @@ impl ReaderApp {
         for thumb in &mut self.active.thumbs {
             *thumb = None;
         }
+        // Invalidates batches that are still running.
+        self.active.thumbnail_batch = self.active.thumbnail_batch.wrapping_add(1);
         self.active.thumbs_started = false;
         if self.active.is_open() && self.active.renderer.is_some() {
             self.active.thumbs_started = true;

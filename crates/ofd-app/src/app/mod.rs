@@ -11,6 +11,7 @@ pub(crate) mod search_state;
 pub(crate) mod selection;
 pub(crate) mod selection_state;
 pub(crate) mod tabs;
+pub(crate) mod task_state;
 pub(crate) mod theme;
 pub(crate) mod view;
 

@@ -1,7 +1,16 @@
 use crate::app::render_policy;
+use crate::app::task_state::{RenderEpoch, TaskTarget};
 use crate::*;
 
 impl ReaderApp {
+    /// Generations a completed raster job must still match.
+    pub(crate) fn render_epoch(&self) -> RenderEpoch {
+        RenderEpoch {
+            document: self.active.generation,
+            view: self.raster.view_generation,
+        }
+    }
+
     pub(crate) fn max_page_dpi(&self) -> u32 {
         self.settings.performance.page_dpi_cap()
     }
@@ -48,7 +57,8 @@ impl ReaderApp {
     /// never re-rasterizes a page that is merely being shown smaller.
     pub(crate) fn schedule_dpi_render(&mut self, cx: &mut Context<Self>) {
         // Every change bumps the generation; only the timer that observes the
-        // newest generation may start a render. A running timer is reused.
+        // newest generation may start a render. A running timer is reused, so
+        // at most one timer exists at a time and it always clears the flag.
         self.raster.dpi_debounce_gen = self.raster.dpi_debounce_gen.wrapping_add(1);
         if self.raster.dpi_pending {
             return;
@@ -122,10 +132,7 @@ impl ReaderApp {
             self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
         }
-        if self.continuous_scrolling()
-            || self.tile_busy()
-            || !self.raster.continuous_pending.is_empty()
-        {
+        if self.continuous_scrolling() || self.tile_busy() || !self.raster.tasks.is_empty() {
             return;
         }
 
@@ -147,8 +154,11 @@ impl ReaderApp {
         };
         self.raster.latest_render = Some(request);
         self.active.loading = self.raster.page_image.is_none();
-        let generation = self.active.generation;
-        let view_generation = self.raster.view_generation;
+        let epoch = self.render_epoch();
+        let ticket = self
+            .raster
+            .tasks
+            .start(TaskTarget::page(page, dpi), 0, epoch);
         let rotation = self.rotation;
 
         cx.spawn(async move |this, cx| {
@@ -178,11 +188,11 @@ impl ReaderApp {
             match result {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
-                        if this.active.generation != generation
-                            || this.raster.view_generation != view_generation
-                        {
+                        if !epoch.matches(this.render_epoch()) {
+                            this.raster.tasks.finish(ticket);
                             return;
                         }
+                        this.raster.tasks.finish(ticket);
                         this.cache_page_image(page, dpi, image.clone(), bytes);
                         this.active.font_reports.insert(page, font_report);
                         if !request.is_latest(this.raster.latest_render) {
@@ -211,9 +221,9 @@ impl ReaderApp {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if this.active.generation != generation
-                            || this.raster.view_generation != view_generation
-                        {
+                        let usable = epoch.matches(this.render_epoch());
+                        this.raster.tasks.finish(ticket);
+                        if !usable {
                             return;
                         }
                         let is_latest = request.is_latest(this.raster.latest_render);
@@ -292,6 +302,10 @@ impl ReaderApp {
             return;
         };
         let generation = self.active.generation;
+        // A newer batch (after clearing the cache) must win over an older one
+        // that is still running: both write the same slots in different
+        // orders.
+        let batch = self.active.thumbnail_batch;
         let count = self.active.page_count().min(THUMB_LIMIT);
         let mut order: Vec<usize> = (0..count).collect();
         order.sort_by_key(|page| page.abs_diff(self.page));
@@ -302,12 +316,12 @@ impl ReaderApp {
                 // foreground page. At most one thumbnail is already running.
                 loop {
                     let ready = this.update(cx, |this, _| {
-                        if this.active.generation != generation {
+                        if !this.thumbnail_batch_is_current(generation, batch) {
                             return None;
                         }
                         Some(
                             !this.continuous_scrolling()
-                                && this.raster.continuous_pending.is_empty()
+                                && this.raster.tasks.is_empty()
                                 && !this.tile_busy()
                                 && this.raster.latest_render.is_none(),
                         )
@@ -334,7 +348,9 @@ impl ReaderApp {
                     continue;
                 };
                 let alive = this.update(cx, |this, cx| {
-                    if this.active.generation == generation && page < this.active.thumbs.len() {
+                    if this.thumbnail_batch_is_current(generation, batch)
+                        && page < this.active.thumbs.len()
+                    {
                         this.gpu.borrow_mut().register(image.clone());
                         this.active.thumbs[page] = Some(image);
                         let visible = this.thumbnail_on_screen(page);
@@ -343,7 +359,7 @@ impl ReaderApp {
                             cx.notify();
                         }
                     }
-                    this.active.generation == generation
+                    this.thumbnail_batch_is_current(generation, batch)
                 });
                 if !matches!(alive, Ok(true)) {
                     break;
@@ -374,13 +390,14 @@ impl ReaderApp {
         let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
+        let target = TaskTarget::page(page, dpi);
         if self.raster.continuous_failed.contains(&(page, dpi))
-            || !self.raster.continuous_pending.insert((page, dpi))
+            || self.raster.tasks.contains(target)
         {
             return;
         }
-        let generation = self.active.generation;
-        let view_generation = self.raster.view_generation;
+        let epoch = self.render_epoch();
+        let ticket = self.raster.tasks.start(target, 0, epoch);
         let rotation = self.rotation;
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -393,12 +410,8 @@ impl ReaderApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.active.generation != generation {
-                    return;
-                }
-                this.raster.continuous_pending.remove(&(page, dpi));
-                if this.raster.view_generation != view_generation {
-                    cx.notify();
+                this.raster.tasks.finish(ticket);
+                if !epoch.matches(this.render_epoch()) {
                     return;
                 }
                 if result.is_err() {
@@ -433,6 +446,12 @@ impl ReaderApp {
             });
         })
         .detach();
+    }
+
+    /// Whether a thumbnail batch still owns the slots it writes: same
+    /// document and no newer batch has started.
+    pub(crate) fn thumbnail_batch_is_current(&self, generation: u64, batch: u64) -> bool {
+        self.active.generation == generation && self.active.thumbnail_batch == batch
     }
 
     /// Thumbnails show in the sidebar and page grid, and stand in for an
@@ -476,7 +495,7 @@ impl ReaderApp {
     /// Page and tile raster jobs in flight; together they share the
     /// configured render thread slots.
     pub(crate) fn raster_jobs(&self) -> usize {
-        self.raster.continuous_pending.len() + self.raster.tile_jobs.len()
+        self.raster.tasks.len()
     }
 
     pub(crate) fn sync_gpu_resources(&mut self, window: &mut Window) {

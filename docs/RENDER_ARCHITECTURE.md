@@ -1,0 +1,189 @@
+# 渲染调度架构
+
+## 目标边界
+
+```text
+视图与交互
+    ↓ 视口、页码、缩放、可见区域
+调度策略（纯逻辑，可无窗口测试）
+    ↓ 任务计划
+任务簿记（任务身份、代际、槽位）
+    ↓ 任务票
+GPUI 执行适配
+    ↓ 后台光栅化、图片转换
+结果接纳（完成、缓存、显示）
+    ↓
+资源生命周期（登记、对账、释放）
+```
+
+## 当前分层现状
+
+| 层 | 位置 | 状态 |
+|---|---|---|
+| 结果接纳规则 | `app/render_policy.rs` | 已抽出，可测试 |
+| 预取排序与预算 | `app/render_policy.rs` | 已抽出，可测试 |
+| 缓存数据与淘汰 | `app/raster_state.rs` | 已抽出，依赖 `RenderImage` |
+| 任务身份与结算 | 分散在 `raster_state` + 执行闭包 | **未统一** |
+| 任务准入 | `rendering/{pages,tiles,continuous}.rs` | **与执行混在一起** |
+| GPUI 执行适配 | 各 `cx.spawn` 闭包 | **含业务判断** |
+| 资源登记与释放 | `gpu.rs` | 已集中，调用点分散 |
+
+`gpu::Resources::register()` 只是图片所有权登记，不是 GPU 上传。
+`painted()` 统计绘制提交，不是硬件时序。
+`background_done()` 只记录诊断计数。
+
+## 阶段 0 核验结论（2026-11-07）
+
+对现有任务簿记逐项核验，确认以下问题**真实存在**。
+
+### 问题 1：分块任务按 Key 无条件删除（已修复）
+
+`rendering/tiles.rs` 完成回调第一行：
+
+```rust
+this.raster.tile_jobs.remove(&key);
+```
+
+位于文档代际和视图代际校验**之前**。若同 Key 的新任务已在旧任务返回前启动，
+旧任务返回会删除新任务的槽位记录，导致：
+
+- `tile_busy()` 误报空闲，可能超出并发上限
+- 在途字节统计偏小，预算判断失真
+
+### 问题 2：连续页任务跨代际删除 pending（已修复）
+
+`rendering/pages.rs` 的 `request_cached_page` 回调：
+
+```rust
+if this.active.generation != generation {
+    return;                     // 文档已切换：不删除，槽位滞留到回调结束
+}
+this.raster.continuous_pending.remove(&(page, dpi));
+if this.raster.view_generation != view_generation {
+    cx.notify();
+    return;
+}
+```
+
+文档代际不同时提前返回，`(page, dpi)` 会一直留在 `continuous_pending`，
+阻塞同页后续请求（`render_ready` 计算的是 pending 数量）。
+
+视图代际不同时先删除再返回，但同键的**新视图**任务可能已经启动，
+删除会误伤新任务。
+
+### 问题 3：DPI 防抖计时器（复核后撤销）
+
+最初判断旧计时器会错误清除 `dpi_pending`，导致防抖失效。
+
+复核结论：**该问题不存在。**
+
+- `schedule_dpi_render` 在 `dpi_pending` 为真时直接返回，同一时刻最多一个计时器。
+- 该计时器必然观察到自己的代际，即“最新代际”。
+- 因此 `dpi_pending = false` 与代际判断的顺序不影响正确性。
+
+保持现有顺序不变。该次修改已回退。
+
+### 问题 4：缩略图重新生成没有批次身份（已修复）
+
+`spawn_thumbnails` 只检查文档代际。用户在设置中“清理缩略图缓存”后：
+
+1. `thumbs` 被清空、`thumbs_started = true`、启动新批次
+2. 旧批次仍在运行，其回调只校验文档代际
+3. 旧批次继续写入 `thumbs`，与新批次交错
+
+新批次从当前页向外排序，旧批次从旧页向外排序，同一页可能被写入两次，
+旧图可能覆盖新图。功能上图片相同，但会产生重复工作与额外登记。
+
+### 问题 5：被拒绝的分块仍登记图片（已修复）
+
+```rust
+this.gpu.borrow_mut().register(image.clone());
+this.raster.cache_tile(...);   // 可能因预算拒绝
+```
+
+预算拒绝时 `cache_tile` 返回 `false`，但图片已登记。当前依赖下一帧
+`reconcile` 清理，属于短暂驻留。不是泄漏，但增加了峰值内存与统计噪声。
+
+### 已确认无问题的部分
+
+- 文档切换后同步写入的旧结果被 `active.generation` 正确拒绝
+- 缓存淘汰保护当前页与刚插入项
+- `reconcile` 释放失败会保留条目以便重试
+- 图片释放通过 `App::drop_image` 可跨窗口完成，不强制要求 `Window`
+
+## 阶段划分
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 0 | 行为基线与风险核验 | 完成 |
+| 1 | 统一任务身份与结算 | 完成 |
+| 2 | 抽离任务准入与请求规划 | 待开始 |
+| 3 | 收敛 GPUI 异步执行适配 | 待开始 |
+| 4 | 统一结果接纳 | 待开始 |
+| 5 | 整理资源登记与释放边界 | 待开始 |
+| 6 | 回归、文档与提交 | 待开始 |
+
+## 基线
+
+`resources/pdf-match/1.ofd` 第 0 页，96 DPI PNG：
+
+```
+sha256 97d7b23796b622917fc03e623ea8466476f9c96b901c85e1bef3dc880f490674
+```
+
+`resources/y.ofd` 第 0 页：
+
+```
+PNG (96 DPI) efa44f8d43097b7ec235c48805ef9cc83745293b807abc8c620945270c420f40
+SVG          2497d434e0d7e1f16dfb3dbfa174e72546daf62e99fe560f212f5a1c4df1ed2f
+```
+
+阶段 1 之后必须与上述值一致。
+
+## 阶段 1 完成情况
+
+新增 `app/task_state.rs`：
+
+- `RenderEpoch`：文档代际 + 视图代际
+- `TaskId` / `TaskTarget` / `TaskTicket` / `TaskInfo`
+- `InFlightTasks`：按任务编号结算，按目标去重
+
+`RasterState` 用 `tasks: InFlightTasks` 取代了：
+
+```text
+tile_jobs: HashMap<Key, usize>
+continuous_pending: HashSet<(page, dpi)>
+```
+
+由此修复：
+
+| 问题 | 修复方式 |
+|---|---|
+| 分块按 Key 无条件删除 | 完成时先 `finish(ticket)`，再判断代际 |
+| 连续页跨代际遗留 pending | 无论代际是否匹配都先结算自己的票 |
+| 被拒绝的分块仍登记图片 | `cache_tile` 返回是否接纳，仅接纳后 `register` |
+| 缩略图旧批次覆盖新批次 | `ActiveDocument::thumbnail_batch` |
+
+`raster_jobs()`、`tile_busy()`、加载指示器和缩略图等待条件全部改为查询
+`InFlightTasks`，不再读取分散的集合。
+
+### 新增测试
+
+`task_state.rs` 覆盖：
+
+- 旧票结算不影响同目标的新任务
+- 按目标去重与按类型统计字节
+- 重复结算只释放一次
+- 代际比较同时覆盖文档与视图
+
+### 回归结果
+
+- `cargo fmt`、Clippy `-D warnings`、全工作区测试通过
+- `resources/pdf-match/1.ofd` PNG 与基线一致
+- `resources/y.ofd` PNG/SVG 与基线一致
+
+## 下一阶段
+
+阶段 2：抽离任务准入与请求规划。目标是把“是否提交、提交什么、优先级”
+从 `request_page_render` / `request_cached_page` / `start_tile` 中移到
+`render_policy`，执行层只负责启动与结果转交。

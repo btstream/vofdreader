@@ -276,9 +276,10 @@ impl Render for ReaderApp {
             || (self.view_mode == ViewMode::Continuous
                 && self
                     .raster
-                    .continuous_pending
-                    .iter()
-                    .any(|(page, _)| self.page_on_screen(*page)))
+                    .tasks
+                    .targets()
+                    .filter_map(|target| target.page_index())
+                    .any(|page| self.page_on_screen(page)))
         {
             canvas = canvas.child(
                 div()

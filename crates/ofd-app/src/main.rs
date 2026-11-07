@@ -182,7 +182,7 @@ impl ReaderApp {
                         this.active.is_open()
                             && !this.active.loading
                             && this.raster.latest_render.is_none()
-                            && this.raster.continuous_pending.is_empty()
+                            && this.raster.tasks.is_empty()
                             && !this.tile_busy()
                             && this.gpu.borrow().stats.page_draws > 0
                             && this

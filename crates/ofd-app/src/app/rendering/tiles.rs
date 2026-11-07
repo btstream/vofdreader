@@ -1,4 +1,5 @@
 use crate::app::render_policy;
+use crate::app::task_state::{TaskTarget, TaskTicket};
 use crate::*;
 
 impl ReaderApp {
@@ -152,7 +153,7 @@ impl ReaderApp {
     }
 
     pub(crate) fn tile_busy(&self) -> bool {
-        !self.raster.tile_jobs.is_empty()
+        self.raster.tasks.targets().any(|target| !target.is_page())
     }
 
     /// Start tile jobs in priority order until every slot is used. Tiles of
@@ -179,7 +180,7 @@ impl ReaderApp {
         let Some(key) = wanted.iter().copied().find(|key| {
             !self.raster.tile_cache.contains_key(key)
                 && !self.raster.tile_failed.contains(key)
-                && !self.raster.tile_jobs.contains_key(key)
+                && !self.raster.tasks.contains(TaskTarget::tile(*key))
         }) else {
             return false;
         };
@@ -207,14 +208,13 @@ impl ReaderApp {
                 size.width.0 as usize * size.height.0 as usize * 4
             })
             .sum();
-        let in_flight: usize = self.raster.tile_jobs.values().sum();
+        let in_flight = self.raster.tasks.tile_bytes();
         if protected_bytes + in_flight + bytes > self.cache_config.tile_bytes() {
             return false;
         }
-        let generation = self.active.generation;
-        let view_generation = self.raster.view_generation;
+        let epoch = self.render_epoch();
+        let ticket: TaskTicket = self.raster.tasks.start(TaskTarget::tile(key), bytes, epoch);
         let rotation = self.rotation;
-        self.raster.tile_jobs.insert(key, bytes);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -237,26 +237,28 @@ impl ReaderApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.raster.tile_jobs.remove(&key);
-                if generation == this.active.generation
-                    && view_generation == this.raster.view_generation
+                let info = this.raster.tasks.finish(ticket);
+                if info.is_some()
+                    && epoch.matches(this.render_epoch())
                     && this.tile_requests(true).contains(&key)
                 {
                     match result {
                         Ok((image, bytes)) => {
                             let protected = this.tile_requests(include_prefetch);
-                            this.gpu.borrow_mut().register(image.clone());
-                            this.raster.cache_tile(
+                            let accepted = this.raster.cache_tile(
                                 key,
-                                image,
+                                image.clone(),
                                 bytes,
                                 this.cache_config.tile_bytes(),
                                 &protected,
                             );
+                            if accepted {
+                                this.gpu.borrow_mut().register(image);
+                            }
                         }
                         Err(error) => {
                             this.raster.tile_failed.insert(key);
-                            eprintln!("[tiles] {key:?}: {error}");
+                            eprintln!("[tiles]: {key:?}: {error}");
                         }
                     }
                 }
