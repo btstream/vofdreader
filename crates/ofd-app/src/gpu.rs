@@ -1,5 +1,9 @@
 //! Ownership of page-image atlas entries, plus opt-in renderer diagnostics.
-//! Counts first successful paint submissions, not hardware DMA/GPU timings.
+//!
+//! `register` is bookkeeping only: it remembers which images the reader may
+//! draw and when they were created. It performs no GPU upload. Upload happens
+//! when GPUI paints a registered image, and `painted` counts those first
+//! submissions, not hardware DMA/GPU timings.
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -69,6 +73,8 @@ impl Resources {
         }
     }
 
+    /// Remembers an image so `reconcile` can keep or release it. This does
+    /// not upload anything.
     pub fn register(&mut self, image: Arc<RenderImage>) {
         if self.images.insert(image.id, image).is_none() {
             self.stats.images_created += 1;
@@ -130,6 +136,8 @@ impl Resources {
         self.log("release", 0, true);
     }
 
+    /// Diagnostic counter for a finished background raster job. It does not
+    /// schedule, redraw or release anything.
     pub fn background_done(&mut self, redraw: bool) {
         self.stats.background_jobs += 1;
         self.stats.background_redraws += u64::from(redraw);

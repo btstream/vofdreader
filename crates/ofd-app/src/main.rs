@@ -161,6 +161,8 @@ impl ReaderApp {
         cx.on_release(|this, cx| {
             this.save_position();
             this.settings.save();
+            // The window is gone, so a plain App-level drop covering every
+            // remaining window is the right sweep here.
             this.gpu
                 .borrow_mut()
                 .release_all(|image| cx.drop_image(image, None));

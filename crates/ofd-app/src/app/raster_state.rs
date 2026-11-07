@@ -2,8 +2,8 @@
 //! in-flight job bookkeeping and the generations that reject stale results.
 //!
 //! Cache insertion and eviction live here so callers only provide limits and
-//! which entries must survive. GPU atlas ownership stays in `gpu::Resources`
-//! because releasing textures needs a `Window`.
+//! which entries must survive. Texture ownership stays in `gpu::Resources`:
+//! this type tracks pixels, not the window atlas they may be uploaded into.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;

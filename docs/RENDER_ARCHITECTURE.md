@@ -120,8 +120,8 @@ this.raster.cache_tile(...);   // 可能因预算拒绝
 | 2 | 抽离任务准入与请求规划 | 完成 |
 | 3 | 收敛 GPUI 异步执行适配 | 完成 |
 | 4 | 统一结果接纳 | 完成 |
-| 5 | 整理资源登记与释放边界 | 待开始 |
-| 6 | 回归、文档与提交 | 待开始 |
+| 5 | 整理资源登记与释放边界 | 完成 |
+| 6 | 回归、文档与提交 | 完成 |
 
 ## 基线
 
@@ -267,8 +267,57 @@ Display    是否可以替换屏幕
 - `resources/pdf-match/1.ofd` PNG 与基线一致
 - `resources/y.ofd` PNG/SVG 与基线一致
 
-## 下一阶段
+## 阶段 5 完成情况
 
-阶段 5：整理资源登记与释放边界。重点确认
-`App::drop_image` 与 `Window::drop_image` 的调用上下文，
-以及"登记成功但缓存拒绝"的图片是否都能在下一帧释放。
+### 文档关闭时的窗口上下文
+
+`clear_active_document` 原先调用 `cx.drop_image(image, None)`。GPUI 在
+窗口更新期间会暂时把该窗口移出 `App.windows`，只传 `None` 时当前窗口的
+atlas 条目要等下一次对账才释放。
+
+现在 `clear_active_document` 接收 `Option<&mut Window>`，打开/切换标签时
+传入当前窗口；`close_tab` 也传入窗口。退出路径（`on_release`）没有窗口，
+仍然用 `None` 覆盖其余窗口，这是正确用法而非遗漏。
+
+### 登记与接纳
+
+分块结果改为"缓存接纳后再登记"，配不上预算的图片不再进入
+`gpu::Resources`，因此不需要等下一帧对账清理。
+
+### 语义澄清
+
+- `register` 只登记所有权，不上传。
+- `painted` 统计首次绘制提交。
+- `background_done` 只记诊断计数。
+- `reconcile` 与 `release_all` 分别用于持续对账和整体清理。
+
+注释已按上述语义修正，不再暗示 `register` 会触发 GPU 工作。
+
+## 阶段 6 完成情况
+
+- `cargo fmt --all -- --check` 通过
+- `cargo clippy --workspace --all-targets -- -D warnings` 通过
+- `cargo test --workspace` 通过（app 104 项）
+- 三个渲染产物与阶段 0 基线逐字节一致
+
+### 行为基线
+
+| 样本 | 产物 | sha256 |
+|---|---|---|
+| `pdf-match/1.ofd` p0 | PNG 96 DPI | `97d7b237…f490674` |
+| `y.ofd` p0 | PNG 96 DPI | `efa44f8d…c420f40` |
+| `y.ofd` p0 | SVG | `2497d434…df1ed2f` |
+
+### 未覆盖的验收
+
+图形界面手工验收（快速翻页、连续滚动、高倍缩放、旋转、切换采样、
+渲染中切换标签、缩略图重建、打开失败、不同渲染线程数）需要实机窗口，
+本轮没有执行，不能以单元测试替代。
+
+## 后续工作
+
+本轮完成了计划中的阶段 0–6。仍可继续的低优先级项：
+
+- `render/renderer.rs` 仍承担字体注册、页面缓存与后端分派
+- `settings_view.rs`、`app/view/chrome.rs` 体量偏大
+- 若出现第二个前端，再评估拆分 `ofd-reader-engine` crate

@@ -15,10 +15,18 @@ impl ReaderApp {
 
     /// Releases every rendering resource owned by the active tab, then clears
     /// the document state. Inactive tabs keep only their `DocumentTab` snapshot.
-    pub(crate) fn clear_active_document(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `window` is the window being updated, if any. GPUI temporarily removes
+    /// it from `App.windows` during an update, so passing it is what makes the
+    /// atlas drop cover the current window too.
+    pub(crate) fn clear_active_document(
+        &mut self,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let gpu = self.gpu.clone();
         gpu.borrow_mut()
-            .release_all(|image| cx.drop_image(image, None));
+            .release_all(|image| cx.drop_image(image, window.as_deref_mut()));
         self.reset_raster_state();
         self.active.close();
         self.selection.layout = None;
@@ -83,13 +91,13 @@ impl ReaderApp {
     pub(crate) fn load_tab(
         &mut self,
         index: usize,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.tabs.get(index).cloned() else {
             return;
         };
-        self.clear_active_document(cx);
+        self.clear_active_document(window.as_deref_mut(), cx);
         self.active_tab = Some(index);
         self.apply_reading(&tab.reading);
         self.search.apply_snapshot(&tab.search);

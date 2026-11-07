@@ -76,7 +76,7 @@ impl ReaderApp {
             self.tabs.remove(index);
             self.active_tab = None;
             if self.tabs.is_empty() {
-                self.clear_active_document(cx);
+                self.clear_active_document(Some(window), cx);
                 self.active.path = None;
                 self.active.file_name.clear();
                 self.active.file_size = 0;
