@@ -311,6 +311,7 @@ impl Render for ReaderApp {
         }
         let reading = reading.child(canvas);
 
+        self.sync_thumbnail_scroll();
         let body = if self.active.is_open() && self.sidebar_open {
             div()
                 .flex_1()

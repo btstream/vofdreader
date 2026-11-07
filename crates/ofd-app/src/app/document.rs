@@ -29,6 +29,9 @@ impl ReaderApp {
             .release_all(|image| cx.drop_image(image, window.as_deref_mut()));
         self.reset_raster_state();
         self.active.close();
+        // A different document must reveal its own restored page even when the
+        // page number happens to be the same.
+        self.thumbnail_scroll_page = None;
         self.selection.layout = None;
         self.page_bounds.set(None);
         self.clear_selection();

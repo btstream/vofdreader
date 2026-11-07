@@ -1,6 +1,41 @@
 use crate::*;
 
+/// Index the thumbnail list should reveal after the main view moved to
+/// `page`, or `None` when the list is not on screen or already synced.
+pub(crate) fn thumbnail_scroll_target(
+    page: usize,
+    visible: usize,
+    list_visible: bool,
+    synced_page: Option<usize>,
+) -> Option<usize> {
+    if !list_visible || visible == 0 || synced_page == Some(page) {
+        return None;
+    }
+    // Pages past the thumbnail limit keep the last preview in view.
+    Some(page.min(visible - 1))
+}
+
 impl ReaderApp {
+    /// Keeps the thumbnail sidebar on the page shown in the reading view.
+    /// Only a page change requests a scroll, so dragging the list is not
+    /// fought by the next frame.
+    pub(crate) fn sync_thumbnail_scroll(&mut self) {
+        let visible = self.active.page_count().min(THUMB_LIMIT);
+        let list_visible = self.sidebar_open && !self.search.open;
+        if !list_visible {
+            // Forget the synced page: the list should reveal the current page
+            // when it is shown again.
+            self.thumbnail_scroll_page = None;
+            return;
+        }
+        let target =
+            thumbnail_scroll_target(self.page, visible, list_visible, self.thumbnail_scroll_page);
+        self.thumbnail_scroll_page = Some(self.page);
+        if let Some(index) = target {
+            self.thumbnail_scroll.scroll_to_item(index);
+        }
+    }
+
     pub(crate) fn thumbnail(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
         let selected = index == self.page;
@@ -120,16 +155,26 @@ impl ReaderApp {
                     .child(format!("{visible}")),
             )
             .child(
+                // The scrollbar must be a sibling of the scrolling element;
+                // inside the overflow container it would scroll away.
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .px_3()
-                    .pb_3()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .children((0..visible).map(|index| self.thumbnail(index, cx))),
+                    .child(
+                        div()
+                            .id("thumbnail-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.thumbnail_scroll)
+                            .px_3()
+                            .pb_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .children((0..visible).map(|index| self.thumbnail(index, cx))),
+                    )
+                    .vertical_scrollbar(&self.thumbnail_scroll),
             )
             .into_any_element();
 

@@ -100,6 +100,10 @@ struct ReaderApp {
     rotation: u8,
     grid_open: bool,
     grid_scroll: ScrollHandle,
+    /// Scroll position owner for the sidebar thumbnail list.
+    thumbnail_scroll: ScrollHandle,
+    /// Page the thumbnail list was last scrolled to; avoids fighting a drag.
+    thumbnail_scroll_page: Option<usize>,
     dark: bool,
     info_dialog_open: bool,
     settings: settings::Settings,
@@ -339,6 +343,8 @@ impl ReaderApp {
             rotation: 0,
             grid_open: false,
             grid_scroll: ScrollHandle::new(),
+            thumbnail_scroll: ScrollHandle::new(),
+            thumbnail_scroll_page: None,
             dark,
             info_dialog_open: false,
             settings,
