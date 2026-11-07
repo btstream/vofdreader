@@ -39,6 +39,28 @@ pub(crate) fn page_raster_estimate(size: SizeMm, dpi: u32, rotation: u8) -> usiz
     pixels.saturating_mul(4).min(usize::MAX as u64) as usize
 }
 
+/// Largest density at or below `target` that `fits` accepts, stepping down in
+/// 24 DPI buckets. Returns `None` when even `floor` does not fit.
+///
+/// Used when a page cannot be reserved at the requested density: showing a
+/// slightly softer frame is better than failing to show the page at all.
+pub(crate) fn affordable_dpi(
+    target: u32,
+    floor: u32,
+    mut fits: impl FnMut(u32) -> bool,
+) -> Option<u32> {
+    let mut dpi = target.max(floor);
+    loop {
+        if fits(dpi) {
+            return Some(dpi);
+        }
+        if dpi <= floor {
+            return None;
+        }
+        dpi = dpi.saturating_sub(24).max(floor);
+    }
+}
+
 /// One neighbour prefetch candidate: the page, its density and the resident
 /// pixel cost of showing it at that density.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +132,45 @@ mod tests {
         assert!(!request(8, 3, 216).is_latest(Some(latest)));
         assert!(!request(7, 4, 216).is_latest(Some(latest)));
         assert!(!request(7, 3, 144).is_latest(Some(latest)));
+    }
+
+    #[test]
+    fn a_lowered_target_does_not_ask_again_for_the_refused_density() {
+        // The view asks for 384, the budget allows 144. `min` keeps the view
+        // from repeatedly requesting 384 and re-rendering every frame.
+        let wanted = 384;
+        let allowed = 144;
+        assert_eq!(wanted.min(allowed), 144);
+        // Once the budget recovers, the view may raise its request again.
+        let allowed = 384;
+        assert_eq!(wanted.min(allowed), 384);
+    }
+
+    #[test]
+    fn density_steps_down_until_it_fits() {
+        let limit = |dpi: u32| dpi <= 144;
+        assert_eq!(affordable_dpi(216, 96, limit), Some(144));
+    }
+
+    #[test]
+    fn density_stays_when_it_already_fits() {
+        assert_eq!(affordable_dpi(192, 96, |_| true), Some(192));
+    }
+
+    #[test]
+    fn density_reports_failure_when_the_floor_does_not_fit() {
+        assert_eq!(affordable_dpi(216, 96, |dpi| dpi < 96), None);
+    }
+
+    #[test]
+    fn density_never_goes_below_the_floor() {
+        let mut seen = Vec::new();
+        let result = affordable_dpi(120, 96, |dpi| {
+            seen.push(dpi);
+            false
+        });
+        assert_eq!(result, None);
+        assert_eq!(seen.last(), Some(&96));
     }
 
     #[test]

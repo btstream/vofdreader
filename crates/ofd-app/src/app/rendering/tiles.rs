@@ -229,6 +229,8 @@ impl ReaderApp {
         ) {
             return false;
         }
+        // A tile that cannot be reserved is skipped, not retried in a loop:
+        // the plan re-runs when a running job returns or the view changes.
         let Ok(reservation) = self.raster.reserve(bytes) else {
             return false;
         };

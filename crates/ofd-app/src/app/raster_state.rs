@@ -38,6 +38,10 @@ pub(crate) struct RasterState {
     pub(crate) dpi_debounce_gen: u64,
     /// Page jobs that failed at this density and must not be retried.
     pub(crate) continuous_failed: HashSet<(usize, u32)>,
+    /// Density the budget last allowed for the visible single page. The view
+    /// asks for more only when the target rises above this, so a page that was
+    /// deliberately rendered softer does not trigger an endless upgrade loop.
+    pub(crate) affordable_dpi: Option<u32>,
     /// Raster jobs currently occupying a worker slot.
     pub(crate) tasks: InFlightTasks,
     /// Bitmap accounting shared by the caches, the on-screen slot and the
@@ -76,6 +80,7 @@ impl RasterState {
             dpi_pending: false,
             dpi_debounce_gen: 0,
             continuous_failed: HashSet::new(),
+            affordable_dpi: None,
             tasks: InFlightTasks::new(),
             budget: BudgetLedger::new(limits),
         }
@@ -99,6 +104,11 @@ impl RasterState {
     /// [`Self::cancel_reservation`] when the closure returns.
     pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
         self.budget.reserve(bytes)
+    }
+
+    /// Whether `bytes` could be reserved right now, without taking it.
+    pub(crate) fn can_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
+        self.budget.can_reserve(bytes)
     }
 
     pub(crate) fn cancel_reservation(&mut self, reservation: Reservation) {
@@ -133,12 +143,14 @@ impl RasterState {
         self.page_cache_bytes = 0;
         self.clear_tiles();
         self.continuous_failed.clear();
+        self.affordable_dpi = None;
     }
 
     /// Returns to the empty state when a document is closed or replaced.
     pub(crate) fn reset(&mut self) {
         self.invalidate();
         self.page_image = None;
+        self.affordable_dpi = None;
         self.dpi_pending = false;
         self.dpi_debounce_gen = self.dpi_debounce_gen.wrapping_add(1);
     }
@@ -233,6 +245,55 @@ impl RasterState {
             .sum();
         self.touch_page(page, dpi);
         true
+    }
+
+    /// Trims caches until the ledger is back within its resident limit, in a
+    /// deliberate order: stale tiles first, then off-screen pages, never the
+    /// pages currently built in the continuous view.
+    ///
+    /// Called when the user lowers the cache setting. Returns the number of
+    /// entries dropped so callers can decide whether to re-render.
+    pub(crate) fn shrink_to_budget(&mut self, on_screen: Range<usize>, current: usize) -> usize {
+        let mut dropped = 0;
+        let over = |state: &Self| state.budget.over_resident_limit();
+        if !over(self) {
+            return 0;
+        }
+        // Prefetched tiles are the least valuable resident pixels.
+        while over(self) {
+            let Some(key) = self.tile_order.pop_front() else {
+                break;
+            };
+            if let Some(image) = self.tile_cache.remove(&key) {
+                self.tile_bytes = self
+                    .tile_cache
+                    .values()
+                    .map(|image| image_bytes(image))
+                    .sum();
+                self.release_if_unreferenced(Self::bitmap_id(&image));
+                dropped += 1;
+            }
+        }
+        // Then off-screen page bitmaps, oldest first.
+        while over(self) {
+            let Some(key) = self.page_cache_order.pop_front() else {
+                break;
+            };
+            let visible = key.0 == current || on_screen.contains(&key.0);
+            if visible {
+                self.page_cache_order.push_back(key);
+                if self.page_cache_order.len() == 1 {
+                    break;
+                }
+                continue;
+            }
+            self.remove_page(key);
+            dropped += 1;
+            if self.page_cache_order.is_empty() {
+                break;
+            }
+        }
+        dropped
     }
 
     /// Evicts cache entries that are not protected until the new bitmap fits
@@ -475,6 +536,76 @@ mod tests {
         state.reset();
         assert!(state.page_image.is_none());
         assert!(state.dpi_debounce_gen > debounce);
+    }
+
+    #[test]
+    fn shrinking_keeps_on_screen_pages_and_drops_prefetched_tiles_first() {
+        let mut state = RasterState::with_budget(BudgetLimits {
+            resident_bytes: 4096,
+            reserved_bytes: 1024,
+        });
+        let roomy = |protected| PageEviction {
+            count_limit: 64,
+            byte_limit: 1 << 20,
+            protected,
+            on_screen: 0..0,
+        };
+        // Two pages of 4x4 pixels (64 bytes each) plus a tile.
+        assert!(state.cache_page(0, 96, render_image(4, 4), 64, roomy((0, 96))));
+        assert!(state.cache_page(5, 96, render_image(4, 4), 64, roomy((5, 96))));
+        assert!(state.cache_tile(
+            tiles::Key {
+                page: 0,
+                dpi: 96,
+                x: 0,
+                y: 0
+            },
+            render_image(2, 2),
+            16,
+            1 << 20,
+            &[],
+        ));
+
+        // The user lowers the setting below what is currently retained.
+        state.set_budget_limits(BudgetLimits {
+            resident_bytes: 64,
+            reserved_bytes: 16,
+        });
+        assert!(state.budget.over_resident_limit());
+
+        // Page 0 is on screen; page 5 is not.
+        let dropped = state.shrink_to_budget(0..1, 0);
+
+        assert!(dropped > 0);
+        assert!(
+            state.page_cache.contains_key(&(0, 96)),
+            "visible page stays"
+        );
+        assert!(!state.page_cache.contains_key(&(5, 96)));
+        assert!(state.tile_cache.is_empty(), "prefetch tiles go first");
+        assert!(!state.budget.over_resident_limit());
+    }
+
+    #[test]
+    fn shrinking_does_nothing_when_already_within_budget() {
+        let mut state = RasterState::with_budget(BudgetLimits {
+            resident_bytes: 1024,
+            reserved_bytes: 256,
+        });
+        assert!(state.cache_page(
+            0,
+            96,
+            render_image(2, 2),
+            16,
+            PageEviction {
+                count_limit: 8,
+                byte_limit: 1 << 20,
+                protected: (0, 96),
+                on_screen: 0..0,
+            }
+        ));
+        assert_eq!(state.shrink_to_budget(0..1, 0), 0);
+        assert!(state.page_cache.contains_key(&(0, 96)));
     }
 
     #[test]

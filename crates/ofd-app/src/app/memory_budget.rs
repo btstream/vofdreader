@@ -102,6 +102,11 @@ impl BudgetLedger {
         self.limits = limits;
     }
 
+    /// Whether the retained bitmaps are above the current resident limit.
+    pub(crate) fn over_resident_limit(&self) -> bool {
+        self.usage().resident_bytes > self.limits.resident_bytes
+    }
+
     pub(crate) fn usage(&self) -> Usage {
         Usage {
             resident_bytes: self.resident.values().sum(),
@@ -146,14 +151,18 @@ impl BudgetLedger {
     /// would be exceeded; a single reservation larger than the pool is also
     /// refused, so an oversized page reports that immediately instead of
     /// failing after a full render.
-    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
+    pub(crate) fn can_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
         if bytes > self.limits.reserved_bytes {
             return Err(BudgetRefusal::ExceedsPool);
         }
-        let usage = self.usage();
-        if usage.reserved_bytes + bytes > self.limits.reserved_bytes {
+        if self.usage().reserved_bytes + bytes > self.limits.reserved_bytes {
             return Err(BudgetRefusal::NoReserveRoom);
         }
+        Ok(())
+    }
+
+    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
+        self.can_reserve(bytes)?;
         self.next_reservation = self.next_reservation.wrapping_add(1);
         let id = self.next_reservation;
         self.reservations.insert(id, bytes);

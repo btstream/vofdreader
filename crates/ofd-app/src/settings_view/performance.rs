@@ -93,7 +93,7 @@ impl ReaderApp {
                         div()
                             .text_size(px(10.0))
                             .text_color(rgb(p.text_tertiary))
-                            .child("整页位图与高清分块共享的保留预算"),
+                            .child("整页位图与高清分块共享的保留预算；不足时自动降低预览清晰度"),
                     )
                     .child(
                         div()

@@ -18,7 +18,12 @@ impl ReaderApp {
     /// Whole-page DPI for the single-page view: the quality preset at the
     /// current zoom (see `base_dpi`). Screen resolution is not considered.
     pub(crate) fn target_dpi(&self) -> u32 {
-        self.base_dpi(self.page, 1)
+        let wanted = self.base_dpi(self.page, 1);
+        match self.raster.affordable_dpi {
+            // Do not keep asking for a density the budget already refused.
+            Some(allowed) => wanted.min(allowed),
+            None => wanted,
+        }
     }
 
     /// Quality preset DPI at 100% zoom (质量档位).
@@ -53,14 +58,33 @@ impl ReaderApp {
     }
 
     /// Applies new cache limits to the live reader. Bitmap accounting takes
-    /// effect immediately; caches above the new limits are trimmed by the next
-    /// eviction or by an explicit re-render request.
+    /// effect immediately; caches that are now over the limit are trimmed so a
+    /// lowered setting converges without waiting for the next insertion.
     pub(crate) fn apply_cache_config(&mut self, config: cache_config::CacheConfig) {
         self.cache_config = config;
         self.raster
             .set_budget_limits(app::memory_budget::BudgetLimits::split(
                 config.total_bytes(),
             ));
+        // A larger budget must be allowed to restore quality; a smaller one is
+        // re-evaluated by the next render.
+        self.raster.affordable_dpi = None;
+        self.shrink_caches();
+    }
+
+    /// Drops off-screen cached bitmaps until retained pixels are back within
+    /// the ledger's resident limit. The visible page and the pages currently
+    /// built in the continuous view are never dropped.
+    pub(crate) fn shrink_caches(&mut self) -> usize {
+        let on_screen = if self.view_mode == ViewMode::Continuous {
+            self.continuous_content_range(self.viewport)
+        } else {
+            self.page..self.page.saturating_add(1)
+        };
+        let dropped = self.raster.shrink_to_budget(on_screen, self.page);
+        // Atlas entries are released by the next frame's `sync_gpu_resources`,
+        // which has the window needed to drop them correctly.
+        dropped
     }
 
     /// Upgrades the bitmap only after the zoom/resize has settled, and only
@@ -175,33 +199,34 @@ impl ReaderApp {
             render_policy::SinglePagePlan::Render { .. } => {}
         }
 
-        // Reserve the pixels before rasterizing, so a page that cannot fit is
-        // reported instead of being rendered and then dropped.
-        let estimate = render_policy::page_raster_estimate(
-            self.active
-                .page_sizes
-                .get(page)
-                .copied()
-                .unwrap_or(SizeMm::new(210.0, 297.0)),
-            dpi,
-            self.rotation,
-        );
-        let reservation = match self.raster.reserve(estimate) {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                self.active.loading = false;
-                self.active.error = Some(
-                    render_policy::reservation_reason(render_policy::ReservationGate {
-                        exceeds_pool: error
-                            == crate::app::memory_budget::BudgetRefusal::ExceedsPool,
-                        pool_full: error == crate::app::memory_budget::BudgetRefusal::NoReserveRoom,
-                    })
-                    .unwrap_or("无法为页面预留内存")
-                    .to_string(),
-                );
-                cx.notify();
-                return;
-            }
+        // Reserve the pixels before rasterizing. If the requested density does
+        // not fit, step down before giving up: a softer frame is still a usable
+        // page, while failing here would leave the screen blank.
+        let size = self
+            .active
+            .page_sizes
+            .get(page)
+            .copied()
+            .unwrap_or(SizeMm::new(210.0, 297.0));
+        let affordable = render_policy::affordable_dpi(dpi, 96.min(dpi), |probe| {
+            let estimate = render_policy::page_raster_estimate(size, probe, self.rotation);
+            self.raster.can_reserve(estimate).is_ok()
+        });
+        self.raster.affordable_dpi = affordable;
+        let Some(dpi) = affordable else {
+            self.active.loading = false;
+            self.active.error = Some("页面位图超过缓存预算".to_string());
+            cx.notify();
+            return;
+        };
+        let estimate = render_policy::page_raster_estimate(size, dpi, self.rotation);
+        let Ok(reservation) = self.raster.reserve(estimate) else {
+            // The affordable check and the reservation can disagree only when
+            // another job reserved in between; report instead of looping.
+            self.active.loading = false;
+            self.active.error = Some("渲染任务已用满内存预留".to_string());
+            cx.notify();
+            return;
         };
 
         self.raster.render_seq = self.raster.render_seq.wrapping_add(1);
@@ -484,18 +509,23 @@ impl ReaderApp {
         let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
-        // Continuous and prefetch pages are admitted only when their pixels can
-        // be reserved; otherwise the plan stops instead of queueing work that
-        // would be discarded on completion.
-        let estimate = render_policy::page_raster_estimate(
-            self.active
-                .page_sizes
-                .get(page)
-                .copied()
-                .unwrap_or(SizeMm::new(210.0, 297.0)),
-            dpi,
-            self.rotation,
-        );
+        // Continuous and prefetch pages step down when the requested density
+        // does not fit; neighbour pages can be softer without hurting the
+        // reading page. A page that cannot fit at the floor is skipped.
+        let size = self
+            .active
+            .page_sizes
+            .get(page)
+            .copied()
+            .unwrap_or(SizeMm::new(210.0, 297.0));
+        let dpi = match render_policy::affordable_dpi(dpi, 48.min(dpi), |probe| {
+            let estimate = render_policy::page_raster_estimate(size, probe, self.rotation);
+            self.raster.can_reserve(estimate).is_ok()
+        }) {
+            Some(dpi) => dpi,
+            None => return,
+        };
+        let estimate = render_policy::page_raster_estimate(size, dpi, self.rotation);
         let Ok(reservation) = self.raster.reserve(estimate) else {
             return;
         };

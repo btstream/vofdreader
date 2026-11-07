@@ -92,27 +92,6 @@ pub(crate) fn may_schedule_prefetch(gate: PrefetchGate) -> bool {
         && !gate.page_loading
 }
 
-/// Whether a page job may start: its pixels must be reserved first.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ReservationGate {
-    /// The bitmap is larger than the whole resident pool.
-    pub(crate) exceeds_pool: bool,
-    /// The reservation pool is full right now.
-    pub(crate) pool_full: bool,
-}
-
-/// A refusal here means the request cannot be satisfied at this density, not
-/// that it should be retried at once.
-pub(crate) fn reservation_reason(gate: ReservationGate) -> Option<&'static str> {
-    if gate.exceeds_pool {
-        Some("页面位图超过缓存预算")
-    } else if gate.pool_full {
-        Some("渲染任务已用满内存预留")
-    } else {
-        None
-    }
-}
-
 /// Whether a tile rasterization may start.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TileGate {
