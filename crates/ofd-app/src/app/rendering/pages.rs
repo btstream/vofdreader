@@ -189,40 +189,46 @@ impl ReaderApp {
                     let font_report = renderer
                         .font_report(&doc, page)
                         .map_err(|error| error.to_string())?;
-                    let bytes = raster.width as usize * raster.height as usize * 4;
-                    let (width, height, pixels) =
-                        rotate::owned(raster.width, raster.height, raster.bgra, rotation)
-                            .ok_or_else(|| "页面图像缓冲区尺寸无效".to_string())?;
-                    let buffer = image::RgbaImage::from_raw(width, height, pixels)
-                        .ok_or_else(|| "页面图像缓冲区尺寸无效".to_string())?;
-                    Ok::<_, String>((
-                        Arc::new(RenderImage::new([image::Frame::new(buffer)])),
-                        bytes,
-                        font_report,
-                    ))
+                    let (image, bytes) = super::worker::page_image_from_raster(
+                        raster.width,
+                        raster.height,
+                        raster.bgra,
+                        rotation,
+                    )
+                    .map_err(str::to_string)?;
+                    Ok::<_, String>((image, bytes, font_report))
                 })
                 .await;
 
             match result {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
-                        if !epoch.matches(this.render_epoch()) {
-                            this.raster.tasks.finish(ticket);
-                            return;
-                        }
                         this.raster.tasks.finish(ticket);
-                        this.cache_page_image(page, dpi, image.clone(), bytes);
-                        this.active.font_reports.insert(page, font_report);
+                        let acceptance =
+                            render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
+                                job: epoch,
+                                current: this.render_epoch(),
+                                latest_request: request.is_latest(this.raster.latest_render),
+                                visible_page: this.page,
+                                result_page: page,
+                                image_missing: this.raster.page_image.is_none(),
+                                result_dpi: dpi,
+                                displayed_dpi: this.raster.image_dpi,
+                                in_horizon: true,
+                            });
+                        if acceptance.retention == render_policy::Retention::Keep {
+                            this.cache_page_image(page, dpi, image.clone(), bytes);
+                            this.active.font_reports.insert(page, font_report);
+                        }
+                        // A superseded request still warms the cache but must
+                        // not clear loading, start thumbnails or repaint; the
+                        // request that replaced it owns those.
                         if !request.is_latest(this.raster.latest_render) {
                             return;
                         }
                         this.raster.latest_render = None;
                         this.active.loading = false;
-                        if request.replaces_visible(
-                            this.page,
-                            this.raster.image_dpi,
-                            this.raster.page_image.is_some(),
-                        ) {
+                        if acceptance.replaces_screen() {
                             this.raster.page_image = Some(image);
                             this.raster.image_dpi = dpi;
                             this.active.error = None;
@@ -239,13 +245,21 @@ impl ReaderApp {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        let usable = epoch.matches(this.render_epoch());
+                        let acceptance =
+                            render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
+                                job: epoch,
+                                current: this.render_epoch(),
+                                latest_request: request.is_latest(this.raster.latest_render),
+                                visible_page: this.page,
+                                result_page: page,
+                                image_missing: this.raster.page_image.is_none(),
+                                result_dpi: dpi,
+                                displayed_dpi: this.raster.image_dpi,
+                                in_horizon: true,
+                            });
                         this.raster.tasks.finish(ticket);
-                        if !usable {
-                            return;
-                        }
-                        let is_latest = request.is_latest(this.raster.latest_render);
-                        if !is_latest {
+                        if !acceptance.is_current() || !request.is_latest(this.raster.latest_render)
+                        {
                             return;
                         }
                         this.raster.latest_render = None;
@@ -358,18 +372,30 @@ impl ReaderApp {
                 let result = cx
                     .background_spawn(async move {
                         let raster = renderer.rasterize_preview(&doc, page, THUMB_DPI).ok()?;
-                        let buffer =
-                            image::RgbaImage::from_raw(raster.width, raster.height, raster.bgra)?;
-                        Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+                        // Thumbnails are never rotated: they follow the page's
+                        // own orientation in the sidebar.
+                        super::worker::image_from_raster(
+                            raster.width,
+                            raster.height,
+                            raster.bgra,
+                            0,
+                            None,
+                            "缩略图缓冲区尺寸无效",
+                        )
+                        .ok()
+                        .map(|(image, _)| image)
                     })
                     .await;
                 let Some(image) = result else {
                     continue;
                 };
                 let alive = this.update(cx, |this, cx| {
-                    if this.thumbnail_batch_is_current(generation, batch)
-                        && page < this.active.thumbs.len()
-                    {
+                    let acceptance =
+                        render_policy::accept_thumbnail(render_policy::ThumbnailAcceptanceInput {
+                            batch_current: this.thumbnail_batch_is_current(generation, batch),
+                            page_in_range: page < this.active.thumbs.len(),
+                        });
+                    if acceptance.retention == render_policy::Retention::Keep {
                         this.gpu.borrow_mut().register(image.clone());
                         this.active.thumbs[page] = Some(image);
                         let visible = this.thumbnail_on_screen(page);
@@ -422,34 +448,41 @@ impl ReaderApp {
                     let raster = renderer
                         .rasterize(&doc, page, dpi as f32)
                         .map_err(|error| error.to_string())?;
-                    rotate::owned(raster.width, raster.height, raster.bgra, rotation)
-                        .ok_or_else(|| "页面图像缓冲区尺寸无效".to_string())
+                    let (image, bytes) = super::worker::page_image_from_raster(
+                        raster.width,
+                        raster.height,
+                        raster.bgra,
+                        rotation,
+                    )
+                    .map_err(str::to_string)?;
+                    Ok::<_, String>((image, bytes))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.raster.tasks.finish(ticket);
-                if !epoch.matches(this.render_epoch()) {
+                let acceptance =
+                    render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
+                        job: epoch,
+                        current: this.render_epoch(),
+                        // Continuous jobs never own the single-page slot.
+                        latest_request: false,
+                        visible_page: this.page,
+                        result_page: page,
+                        image_missing: false,
+                        result_dpi: dpi,
+                        displayed_dpi: 0,
+                        in_horizon: this.nearby_page_range().contains(&page),
+                    });
+                if !acceptance.is_current() {
                     return;
                 }
                 if result.is_err() {
                     this.raster.continuous_failed.insert((page, dpi));
                 }
-                // Do not retain a completed frame outside the current visible
-                // and nearby-prefetch horizon. There is one in-flight job.
-                if let Ok((width, height, pixels)) = result
-                    && render_policy::may_retain_cached_page(
-                        this.nearby_page_range().contains(&page),
-                        true,
-                    )
-                    && let Some(buffer) = image::RgbaImage::from_raw(width, height, pixels)
+                if let Ok((image, bytes)) = result
+                    && acceptance.retention == render_policy::Retention::Keep
                 {
-                    let bytes = width as usize * height as usize * 4;
-                    this.cache_page_image(
-                        page,
-                        dpi,
-                        Arc::new(RenderImage::new([image::Frame::new(buffer)])),
-                        bytes,
-                    );
+                    this.cache_page_image(page, dpi, image, bytes);
                     if !this.active.thumbs_started {
                         this.active.thumbs_started = true;
                         this.spawn_thumbnails(cx);

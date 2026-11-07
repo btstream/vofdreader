@@ -4,8 +4,6 @@
 //! a receiver, a timer or a window. Keeping the rules here means the
 //! rendering modules can be reduced to "ask, then start".
 
-use crate::app::task_state::RenderEpoch;
-
 /// What the single-page path should do for the visible page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SinglePagePlan {
@@ -151,18 +149,6 @@ pub(crate) fn preview_density(input: PreviewInput) -> PreviewSource {
         (true, Some(dpi)) => PreviewSource::Cached(dpi),
         _ => PreviewSource::None,
     }
-}
-
-/// Whether the result of a cached-page job should be retained. Results
-/// outside the visible and prefetch horizon are dropped instead of growing
-/// the cache.
-pub(crate) fn may_retain_cached_page(in_horizon: bool, has_pixels: bool) -> bool {
-    in_horizon && has_pixels
-}
-
-/// Whether a completed job still belongs to the current document and view.
-pub(crate) fn result_is_usable(job: RenderEpoch, current: RenderEpoch) -> bool {
-    job.matches(current)
 }
 
 #[cfg(test)]
@@ -383,35 +369,5 @@ mod tests {
             }),
             PreviewSource::None
         );
-    }
-
-    #[test]
-    fn cached_page_results_need_pixels_and_a_nearby_page() {
-        assert!(may_retain_cached_page(true, true));
-        assert!(!may_retain_cached_page(false, true));
-        assert!(!may_retain_cached_page(true, false));
-    }
-
-    #[test]
-    fn stale_epochs_are_unusable() {
-        let current = RenderEpoch {
-            document: 2,
-            view: 3,
-        };
-        assert!(result_is_usable(current, current));
-        assert!(!result_is_usable(
-            RenderEpoch {
-                document: 1,
-                view: 3
-            },
-            current
-        ));
-        assert!(!result_is_usable(
-            RenderEpoch {
-                document: 2,
-                view: 2
-            },
-            current
-        ));
     }
 }

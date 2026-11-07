@@ -118,8 +118,8 @@ this.raster.cache_tile(...);   // 可能因预算拒绝
 | 0 | 行为基线与风险核验 | 完成 |
 | 1 | 统一任务身份与结算 | 完成 |
 | 2 | 抽离任务准入与请求规划 | 完成 |
-| 3 | 收敛 GPUI 异步执行适配 | 待开始 |
-| 4 | 统一结果接纳 | 待开始 |
+| 3 | 收敛 GPUI 异步执行适配 | 完成 |
+| 4 | 统一结果接纳 | 完成 |
 | 5 | 整理资源登记与释放边界 | 待开始 |
 | 6 | 回归、文档与提交 | 待开始 |
 
@@ -220,7 +220,55 @@ render_policy/
 - `resources/pdf-match/1.ofd` PNG 与基线一致
 - `resources/y.ofd` PNG/SVG 与基线一致
 
+## 阶段 3 完成情况
+
+新增 `app/rendering/worker.rs`：
+
+- `image_from_raster`：校验缓冲区、旋转、包装成 `RenderImage`
+- `page_image_from_raster`：整页版本，尺寸由渲染器决定
+
+四个闭包（单页、连续页、分块、缩略图）不再各自复制旋转与校验代码。
+分块保留预期的旋转后尺寸校验，与原有"尺寸不一致"错误一致。
+
+新增 3 个测试：旋转后像素总数不变、期望尺寸不符被拒绝、缓冲区长度不符被拒绝。
+
+## 阶段 4 完成情况
+
+新增 `render_policy/acceptance.rs`，把完成结果拆成三个独立判断：
+
+```text
+Currency   文档/视图代际是否仍匹配
+Retention  是否值得进入缓存
+Display    是否可以替换屏幕
+```
+
+对应 `accept_page_frame` / `accept_tile` / `accept_thumbnail`。
+
+调用点变化：
+
+| 位置 | 原先 | 现在 |
+|---|---|---|
+| 单页成功 | 代际 + latest + DPI 三重 if | `acceptance.replaces_screen()` |
+| 单页失败 | 单独判断代际 | 同一 `acceptance.is_current()` |
+| 连续页 | 只判断代际 | 同一接纳结构，`latest_request: false` |
+| 分块成功 | `finish` + 代际 + wanted + 预算 | `accept_tile` 汇总判断 |
+| 缩略图 | 批次判断内联 | `accept_thumbnail` |
+
+新增 12 个接纳测试，覆盖过期、被取代、离屏、超出预取范围、
+空白页接受低清、低清不覆盖高清、分块预算和旧缩略图批次。
+
+原先分散在 `mod.rs` 与 `admission.rs` 的 `replaces_visible`、
+`frame_is_current`、`may_retain_cached_page`、`result_is_usable`
+及其测试已由接纳结构取代并删除。
+
+### 回归结果
+
+- `cargo fmt`、Clippy `-D warnings`、全工作区测试通过（app 104 项）
+- `resources/pdf-match/1.ofd` PNG 与基线一致
+- `resources/y.ofd` PNG/SVG 与基线一致
+
 ## 下一阶段
 
-阶段 3：收敛 GPUI 异步执行适配。把后台光栅化、像素旋转与
-`RenderImage` 转换从各闭包集中到一处，闭包只保留"领取票、启动、交回结果"。
+阶段 5：整理资源登记与释放边界。重点确认
+`App::drop_image` 与 `Window::drop_image` 的调用上下文，
+以及"登记成功但缓存拒绝"的图片是否都能在下一帧释放。

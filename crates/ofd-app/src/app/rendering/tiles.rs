@@ -233,29 +233,56 @@ impl ReaderApp {
                     let raster = renderer
                         .rasterize_region(&doc, key.page, key.dpi as f32, region)
                         .map_err(|e| e.to_string())?;
-                    let (width, height, pixels) =
-                        rotate::owned(raster.width, raster.height, raster.bgra, rotation)
-                            .ok_or("无效分块缓冲区")?;
-                    if (width, height) != (sample.width, sample.height) {
-                        return Err("分块旋转尺寸不一致".to_string());
-                    }
-                    let bytes = width as usize * height as usize * 4;
-                    let buffer = image::RgbaImage::from_raw(width, height, pixels)
-                        .ok_or("无效分块缓冲区")?;
-                    Ok::<_, String>((
-                        Arc::new(RenderImage::new([image::Frame::new(buffer)])),
-                        bytes,
-                    ))
+                    super::worker::image_from_raster(
+                        raster.width,
+                        raster.height,
+                        raster.bgra,
+                        rotation,
+                        Some((sample.width, sample.height)),
+                        "无效分块缓冲区",
+                    )
+                    .map_err(str::to_string)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let info = this.raster.tasks.finish(ticket);
-                if info.is_some()
-                    && render_policy::result_is_usable(epoch, this.render_epoch())
-                    && this.tile_requests(true).contains(&key)
-                {
+                if info.is_none() {
+                    // Cleared by a document switch or invalidation; the slot
+                    // was already forgotten, so the result is unusable.
+                } else {
+                    let still_wanted = this.tile_requests(true).contains(&key);
+                    let within_budget = {
+                        let protected = this.tile_requests(include_prefetch);
+                        let protected_bytes: usize = protected
+                            .iter()
+                            .filter_map(|key| this.raster.tile_cache.get(key))
+                            .map(|image| {
+                                let size = image.size(0);
+                                size.width.0 as usize * size.height.0 as usize * 4
+                            })
+                            .sum();
+                        match &result {
+                            Ok((_, bytes)) => render_policy::may_keep_tile(
+                                still_wanted,
+                                protected_bytes,
+                                this.raster.tasks.tile_bytes(),
+                                *bytes,
+                                this.cache_config.tile_bytes(),
+                            ),
+                            Err(_) => true,
+                        }
+                    };
+                    let acceptance =
+                        render_policy::accept_tile(render_policy::TileAcceptanceInput {
+                            job: epoch,
+                            current: this.render_epoch(),
+                            still_wanted,
+                            within_budget,
+                        });
                     match result {
-                        Ok((image, bytes)) => {
+                        Ok((image, bytes))
+                            if acceptance.retention == render_policy::Retention::Keep =>
+                        {
                             let protected = this.tile_requests(include_prefetch);
                             let accepted = this.raster.cache_tile(
                                 key,
@@ -268,9 +295,15 @@ impl ReaderApp {
                                 this.gpu.borrow_mut().register(image);
                             }
                         }
+                        Ok(_) => {}
                         Err(error) => {
-                            this.raster.tile_failed.insert(key);
-                            eprintln!("[tiles]: {key:?}: {error}");
+                            // Only a failure for a tile that is still part of
+                            // the plan is worth remembering; a tile that left
+                            // the plan may be retried when it comes back.
+                            if acceptance.is_current() && still_wanted {
+                                this.raster.tile_failed.insert(key);
+                                eprintln!("[tiles]: {key:?}: {error}");
+                            }
                         }
                     }
                 }
