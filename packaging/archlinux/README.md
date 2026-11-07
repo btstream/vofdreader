@@ -1,6 +1,6 @@
 # Arch Linux 打包
 
-`PKGBUILD` 构建 `vofdreader-git`，从 GitHub `main` 获取最新源码，版本号自动生成为 `0.2.0.r<提交数>.g<短哈希>`。目前声明支持 `x86_64`，其他架构未经打包验证。
+`PKGBUILD` 构建 `vofdreader-git`，从 GitHub `main` 获取最新源码，版本号自动生成为 `0.3.0.r<提交数>.g<短哈希>`。目前声明支持 `x86_64`，其他架构未经打包验证。
 
 ## 构建与安装
 

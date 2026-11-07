@@ -1,6 +1,6 @@
 # Maintainer: VofdReader contributors
 pkgname=vofdreader-git
-pkgver=0.2.0.r0.g0000000
+pkgver=0.3.0.r0.g0000000
 pkgrel=1
 pkgdesc='Lightweight OFD document reader built with Rust and GPUI'
 arch=('x86_64')

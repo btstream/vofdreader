@@ -4397,7 +4397,7 @@ dependencies = [
 
 [[package]]
 name = "ofd-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui-kit",
  "image",
@@ -4409,7 +4409,7 @@ dependencies = [
 
 [[package]]
 name = "ofd-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "ofd-core",
@@ -4417,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "ofd-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
