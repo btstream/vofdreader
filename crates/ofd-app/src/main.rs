@@ -26,6 +26,7 @@ mod continuous;
 mod export;
 mod font_policy;
 mod gpu;
+mod memory_allocator;
 mod recent;
 mod rotate;
 mod search_highlight;
@@ -45,7 +46,6 @@ pub(crate) use ui::*;
 const APP_ID: &str = "vofdreader";
 const THUMB_LIMIT: usize = 80;
 const SEARCH_LIMIT: usize = 120;
-const THUMB_DPI: f32 = 48.0;
 /// Hides the floating zoom bar after this much pointer inactivity.
 const BAR_HIDE_DELAY: Duration = Duration::from_millis(2500);
 const CONTINUOUS_IDLE: Duration = Duration::from_millis(160);
@@ -260,6 +260,7 @@ impl ReaderApp {
             .detach();
         }
 
+        Self::start_scroll_benchmark(cx);
         if let Some(receiver) = instance_rx {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -371,6 +372,7 @@ impl ReaderApp {
 }
 
 fn main() {
+    memory_allocator::configure();
     let launch_paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)

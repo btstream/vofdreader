@@ -44,3 +44,16 @@ fn user_policy_boundary_clamps_extreme_values() {
         assert!(config.tile_working_bytes() <= config.tile_bytes());
     }
 }
+
+#[test]
+fn low_output_budget_also_reduces_auxiliary_retention() {
+    let low = CacheConfig::new(64, 32, 12);
+    assert_eq!(low.parsed_page_limit(), 4);
+    assert_eq!(low.parsed_page_bytes(), 32 * MIB);
+    assert_eq!(low.decoded_image_bytes(), 16 * MIB);
+    assert_eq!(low.thumbnail_bytes(), 8 * MIB);
+    let large = CacheConfig::new(2048, 256, 64);
+    assert_eq!(large.parsed_page_bytes(), 128 * MIB);
+    assert_eq!(large.decoded_image_bytes(), 64 * MIB);
+    assert_eq!(large.thumbnail_bytes(), 64 * MIB);
+}

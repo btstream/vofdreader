@@ -52,6 +52,18 @@ impl CacheConfig {
     }
     pub fn parsed_page_limit(self) -> usize {
         self.parsed_page_limit
+            .min((self.total_bytes / (16 * MIB)).max(1))
+    }
+    /// Independent source/prepared/thumbnail retention pools, scaled with the
+    /// output setting. These do not turn the setting into a process RSS cap.
+    pub fn parsed_page_bytes(self) -> usize {
+        (self.total_bytes / 2).min(128 * MIB)
+    }
+    pub fn decoded_image_bytes(self) -> usize {
+        (self.total_bytes / 4).min(64 * MIB)
+    }
+    pub fn thumbnail_bytes(self) -> usize {
+        (self.total_bytes / 8).min(64 * MIB)
     }
 
     /// Zero disables the respective prefetch path; larger ranges are bounded.

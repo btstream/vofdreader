@@ -21,6 +21,15 @@ impl Render for ReaderApp {
             ..Font::default()
         };
         self.sync_gpu_resources(window);
+        if !self.active.thumbs_started
+            && self.active.renderer.is_some()
+            && (self.raster.page_image.is_some()
+                || !self.raster.page_cache.is_empty()
+                || self.grid_open)
+        {
+            self.active.thumbs_started = true;
+            self.spawn_thumbnails(cx);
+        }
         self.page_coverage.borrow_mut().clear();
         self.raster.tile_wanted.clear();
         self.raster.tile_prefetch.clear();
@@ -61,6 +70,7 @@ impl Render for ReaderApp {
             && !self.grid_open
             && self.view_mode == ViewMode::Single
             && !self.active.loading
+            && self.active.error.is_none()
             && !self.raster.dpi_pending
             && self.target_dpi() > self.raster.image_dpi
         {

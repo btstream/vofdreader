@@ -428,7 +428,7 @@ impl Builder<'_> {
             .image_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_or_decode(data)
+            .get_or_decode(data, &self.renderer.image_cache_limit)
         else {
             return;
         };

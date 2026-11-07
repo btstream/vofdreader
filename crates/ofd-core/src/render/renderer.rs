@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use resvg::usvg::{self, fontdb};
 
@@ -68,6 +69,32 @@ pub(crate) enum CachedPage {
     Prepared(Arc<raster::Prepared>),
 }
 
+enum ActivePage {
+    Tree(Weak<usvg::Tree>),
+    Prepared(Weak<raster::Prepared>),
+}
+
+impl ActivePage {
+    fn from_page(page: &CachedPage) -> Self {
+        match page {
+            CachedPage::Tree(page) => Self::Tree(Arc::downgrade(page)),
+            CachedPage::Prepared(page) => Self::Prepared(Arc::downgrade(page)),
+        }
+    }
+    fn upgrade(&self) -> Option<CachedPage> {
+        match self {
+            Self::Tree(page) => page.upgrade().map(CachedPage::Tree),
+            Self::Prepared(page) => page.upgrade().map(CachedPage::Prepared),
+        }
+    }
+    fn is_live(&self) -> bool {
+        match self {
+            Self::Tree(page) => page.strong_count() > 0,
+            Self::Prepared(page) => page.strong_count() > 0,
+        }
+    }
+}
+
 impl CachedPage {
     /// Allocation identity, for cache tests.
     #[cfg(test)]
@@ -88,11 +115,16 @@ pub struct PageRenderer {
     /// Prepared pages (or parsed SVG trees), most recently used last.
     /// Re-rasterizing at a new DPI or revisiting a page skips parsing.
     pub(crate) tree_cache: Mutex<VecDeque<(usize, CachedPage)>>,
-    pub(crate) tree_cache_limit: usize,
+    pub(crate) tree_cache_limit: AtomicUsize,
+    tree_cache_bytes: AtomicUsize,
     /// Per-page build gates so concurrent requests share one build.
     pub(crate) building: Mutex<HashMap<usize, Arc<Mutex<()>>>>,
+    /// Share a page among active painters even if it is too large to retain.
+    /// Weak ownership must never extend the lifetime of source pixels/paths.
+    active_pages: Mutex<HashMap<usize, ActivePage>>,
     pub(crate) font_cache: Mutex<raster::FontCache>,
     pub(crate) image_cache: Mutex<raster::ImageCache>,
+    pub(crate) image_cache_limit: AtomicUsize,
     /// `ImageFilter` as u8: applied at raster time, so changing it needs no
     /// re-parse of cached pages (callers drop their old bitmaps).
     pub(crate) image_filter: std::sync::atomic::AtomicU8,
@@ -155,10 +187,13 @@ impl PageRenderer {
             font_reports: Mutex::new(HashMap::new()),
             backend: RasterBackend::from_env(),
             tree_cache: Mutex::new(VecDeque::new()),
-            tree_cache_limit: limit.min(256),
+            tree_cache_limit: AtomicUsize::new(limit.min(256)),
+            tree_cache_bytes: AtomicUsize::new(usize::MAX),
             building: Mutex::new(HashMap::new()),
+            active_pages: Mutex::new(HashMap::new()),
             font_cache: Mutex::new(raster::FontCache::default()),
             image_cache: Mutex::new(raster::ImageCache::default()),
+            image_cache_limit: AtomicUsize::new(raster::IMAGE_CACHE_BYTES),
             image_filter: std::sync::atomic::AtomicU8::new(ImageFilter::default().to_u8()),
         }
     }
@@ -170,11 +205,46 @@ impl PageRenderer {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+        self.active_pages
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self
     }
 
     pub fn backend(&self) -> RasterBackend {
         self.backend
+    }
+
+    /// Retention policy only: active builds/paints may still own their pages
+    /// and decoded sources. Parsed byte costs are conservative estimates, not RSS.
+    pub fn set_cache_limits(&self, parsed_pages: usize, parsed_bytes: usize, decoded_bytes: usize) {
+        self.tree_cache_limit
+            .store(parsed_pages.min(256), Ordering::Relaxed);
+        self.tree_cache_bytes.store(parsed_bytes, Ordering::Relaxed);
+        self.image_cache_limit
+            .store(decoded_bytes, Ordering::Relaxed);
+        // Never block a UI settings update on an active image decoder. A busy
+        // cache applies the atomic limits on its next access.
+        if let Ok(mut cache) = self.tree_cache.try_lock() {
+            self.trim_tree_cache(&mut cache);
+        }
+        if let Ok(mut cache) = self.image_cache.try_lock() {
+            cache.set_limit(decoded_bytes);
+        }
+    }
+
+    fn trim_tree_cache(&self, cache: &mut VecDeque<(usize, CachedPage)>) {
+        let limit = self.tree_cache_limit.load(Ordering::Relaxed);
+        let bytes = self.tree_cache_bytes.load(Ordering::Relaxed);
+        while cache.len() > limit
+            || (bytes != usize::MAX
+                && cache.iter().fold(0usize, |sum, (_, page)| {
+                    sum.saturating_add(page.estimated_bytes())
+                }) > bytes)
+        {
+            cache.pop_front();
+        }
     }
 
     /// Image sampling for the direct backend; takes effect on the next
@@ -319,26 +389,43 @@ impl PageRenderer {
             .or_default()
             .clone();
         let _building = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(page) = self.cache_lookup(index) {
-            return Ok(page);
-        }
-        let page = self.build_page(doc, index);
+        let page = if let Some(page) = self.cache_lookup(index) {
+            Ok(page)
+        } else {
+            let page = self.build_page(doc, index);
+            if let Ok(page) = &page {
+                let mut active = self
+                    .active_pages
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                active.retain(|_, page| page.is_live());
+                active.insert(index, ActivePage::from_page(page));
+            }
+            page
+        };
         if retain && let Ok(page) = &page {
             let mut cache = self
                 .tree_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !cache.iter().any(|(cached, _)| *cached == index) {
+            let limit = self.tree_cache_bytes.load(Ordering::Relaxed);
+            if !cache.iter().any(|(cached, _)| *cached == index)
+                && (limit == usize::MAX || page.estimated_bytes() <= limit)
+            {
                 cache.push_back((index, page.clone()));
             }
-            while cache.len() > self.tree_cache_limit {
-                cache.pop_front();
-            }
+            self.trim_tree_cache(&mut cache);
         }
-        self.building
+        drop(_building);
+        let mut gates = self
+            .building
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&index);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Waiters must keep using the same gate even when this page is too
+        // large for LRU retention. The last owner removes the idle gate.
+        if Arc::strong_count(&gate) == 2 {
+            gates.remove(&index);
+        }
         page
     }
 
@@ -347,11 +434,19 @@ impl PageRenderer {
             .tree_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let position = cache.iter().position(|(cached, _)| *cached == index)?;
-        let entry = cache.remove(position).expect("position came from iter");
-        let page = entry.1.clone();
-        cache.push_back(entry);
-        Some(page)
+        self.trim_tree_cache(&mut cache);
+        if let Some(position) = cache.iter().position(|(cached, _)| *cached == index) {
+            let entry = cache.remove(position).expect("position came from iter");
+            let page = entry.1.clone();
+            cache.push_back(entry);
+            return Some(page);
+        }
+        drop(cache);
+        self.active_pages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&index)
+            .and_then(ActivePage::upgrade)
     }
 
     pub(crate) fn build_page(&self, doc: &OfdDocument, index: usize) -> Result<CachedPage> {

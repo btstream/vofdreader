@@ -239,6 +239,7 @@ impl ReaderApp {
         let page = self.continuous_page_at(viewport, scroll);
         if page != self.page {
             self.page = page;
+            self.raster.page_prefetch.clear();
             self.selection.layout = None;
             self.clear_selection();
             if !self.continuous_scrolling() {

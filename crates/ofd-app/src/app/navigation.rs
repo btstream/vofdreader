@@ -21,8 +21,9 @@ impl ReaderApp {
             ViewMode::Single => ViewMode::Continuous,
             ViewMode::Continuous => ViewMode::Single,
         };
-        self.raster.page_image = None;
+        self.raster.set_page_image(None);
         self.raster.image_dpi = 0;
+        self.raster.latest_render = None;
         self.selection.layout = None;
         self.clear_selection();
         match self.view_mode {
@@ -40,7 +41,8 @@ impl ReaderApp {
             return;
         }
         self.page = page;
-        self.raster.page_image = None;
+        self.raster.page_prefetch.clear();
+        self.raster.set_page_image(None);
         self.raster.image_dpi = 0;
         self.selection.layout = None;
         self.clear_selection();
@@ -170,7 +172,7 @@ impl ReaderApp {
         self.refresh_search_highlights();
         // Cached rasters and in-flight jobs belong to the previous orientation;
         // the old bitmap has the wrong shape, so nothing stays on screen.
-        self.raster.page_image = None;
+        self.raster.set_page_image(None);
         if self.active.is_open() && self.view_mode == ViewMode::Continuous {
             self.scroll_to_continuous_page(self.viewport, self.page);
         }

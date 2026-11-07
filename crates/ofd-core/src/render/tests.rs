@@ -47,18 +47,34 @@ fn configurable_tree_cache_reuses_recent_pages_and_evicts_lru() {
     page(&renderer, 2);
     assert_eq!(renderer.tree_cache.lock().unwrap().len(), 2);
     assert_eq!(first, page(&renderer, 0));
-    // An evicted page is rebuilt; compare while the old one is alive.
+    // An evicted page may still be shared by active painters without keeping
+    // an extra strong cache owner.
     let old = renderer.cached_page(&doc, 1, true).unwrap();
     let _ = second;
     page(&renderer, 0);
     page(&renderer, 2);
-    assert_ne!(old.id(), page(&renderer, 1));
+    assert!(
+        !renderer
+            .tree_cache
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(index, _)| *index == 1)
+    );
+    assert_eq!(old.id(), page(&renderer, 1));
     let disabled = PageRenderer::with_tree_cache_limit(&doc, 0);
     let kept = disabled.cached_page(&doc, 0, true).unwrap();
-    assert_ne!(kept.id(), page(&disabled, 0));
+    assert_eq!(kept.id(), page(&disabled, 0));
     assert!(disabled.tree_cache.lock().unwrap().is_empty());
+    drop(kept);
+    assert!(
+        disabled.cache_lookup(0).is_none(),
+        "weak active sharing is not retention"
+    );
     assert_eq!(
-        PageRenderer::with_tree_cache_limit(&doc, usize::MAX).tree_cache_limit,
+        PageRenderer::with_tree_cache_limit(&doc, usize::MAX)
+            .tree_cache_limit
+            .load(std::sync::atomic::Ordering::Relaxed),
         256
     );
 
@@ -97,12 +113,54 @@ fn configurable_tree_cache_reuses_recent_pages_and_evicts_lru() {
     });
     assert_eq!(parallel.tree_cache.lock().unwrap().len(), 1);
     assert!(parallel.building.lock().unwrap().is_empty());
+    // A page over the byte allowance is shared while painters are active,
+    // rather than decoding/building it independently for every parallel tile.
+    disabled.set_cache_limits(2, 0, 0);
+    let barrier = std::sync::Barrier::new(8);
+    let ids: Vec<_> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let prepared = disabled.cached_page(&doc, 0, true).unwrap();
+                    barrier.wait();
+                    prepared.id()
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|job| job.join().unwrap()).collect()
+    });
+    assert!(ids.iter().all(|id| *id == ids[0]));
+    assert!(disabled.tree_cache.lock().unwrap().is_empty());
+    assert!(disabled.cache_lookup(0).is_none());
+    assert!(disabled.building.lock().unwrap().is_empty());
     for (i, tile) in results.iter().enumerate() {
         let serial = renderer
             .rasterize_region(&doc, 1, 192.0, region(i as u32 * 64))
             .unwrap();
         assert_eq!(tile, &serial.bgra);
     }
+    let live = renderer.cached_page(&doc, 0, true).unwrap();
+    let bytes = live.estimated_bytes();
+    assert!(bytes > 0);
+    renderer.set_cache_limits(1, bytes, 16);
+    assert!(renderer.tree_cache.lock().unwrap().len() <= 1);
+    renderer.set_cache_limits(2, bytes - 1, 0);
+    assert!(renderer.tree_cache.lock().unwrap().is_empty());
+    assert_eq!(
+        renderer
+            .cached_page(&doc, 0, true)
+            .unwrap()
+            .estimated_bytes(),
+        bytes
+    );
+    assert!(
+        renderer.tree_cache.lock().unwrap().is_empty(),
+        "oversized parsed page is not retained"
+    );
+    assert!(
+        live.estimated_bytes() > 0,
+        "active owners remain valid after limits shrink"
+    );
 }
 
 use super::*;

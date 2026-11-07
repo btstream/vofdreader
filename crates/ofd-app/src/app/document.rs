@@ -28,6 +28,7 @@ impl ReaderApp {
         gpu.borrow_mut()
             .release_all(|image| cx.drop_image(image, window.as_deref_mut()));
         self.reset_raster_state();
+        self.raster.reconcile_registered(|_| false);
         self.active.close();
         // A different document must reveal its own restored page even when the
         // page number happens to be the same.
@@ -165,12 +166,22 @@ impl ReaderApp {
                 let generation = self.active.generation;
                 let renderer_doc = doc.clone();
                 let parsed_page_limit = self.cache_config.parsed_page_limit();
+                let cache_config = self.cache_config;
                 let image_filter = self.settings.performance.image_sampling.filter();
                 cx.spawn(async move |this, cx| {
                     let renderer = cx
                         .background_spawn(async move {
-                            PageRenderer::with_tree_cache_limit(&renderer_doc, parsed_page_limit)
-                                .with_image_filter(image_filter)
+                            let renderer = PageRenderer::with_tree_cache_limit(
+                                &renderer_doc,
+                                parsed_page_limit,
+                            )
+                            .with_image_filter(image_filter);
+                            renderer.set_cache_limits(
+                                parsed_page_limit,
+                                cache_config.parsed_page_bytes(),
+                                cache_config.decoded_image_bytes(),
+                            );
+                            renderer
                         })
                         .await;
                     let _ = this.update(cx, |this, cx| {
@@ -178,6 +189,15 @@ impl ReaderApp {
                             return;
                         }
                         this.active.renderer = Some(Arc::new(renderer));
+                        // Settings may have changed while font loading ran.
+                        if let Some(renderer) = &this.active.renderer {
+                            let config = this.cache_config;
+                            renderer.set_cache_limits(
+                                config.parsed_page_limit(),
+                                config.parsed_page_bytes(),
+                                config.decoded_image_bytes(),
+                            );
+                        }
                         this.request_page_render(cx);
                         cx.notify();
                     });

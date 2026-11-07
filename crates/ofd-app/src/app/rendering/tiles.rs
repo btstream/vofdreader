@@ -17,7 +17,15 @@ impl ReaderApp {
         } else {
             (self.fit_scale(self.viewport) * self.zoom, 1)
         };
-        let base = self.base_dpi(page, visible);
+        let base = self.budget_page_dpi(
+            page,
+            self.base_dpi(page, visible),
+            if self.view_mode == ViewMode::Single {
+                96
+            } else {
+                48
+            },
+        )?;
         // Keep the visible tile working set (viewport area in page pixels at
         // the tile density) inside its reservation.
         let area =
@@ -57,6 +65,7 @@ impl ReaderApp {
             page_loading: self.active.loading,
         };
         if !render_policy::may_schedule_prefetch(gate) {
+            self.raster.page_prefetch.clear();
             return;
         }
         // Fill every free slot with visible tiles first; nearby pages and
@@ -82,11 +91,12 @@ impl ReaderApp {
         // left after the on-screen pages counts: prefetching more than the
         // cache holds evicts one neighbour per finished neighbour, forever.
         let dpi_of = |this: &Self, page: usize| {
-            if this.view_mode == ViewMode::Continuous {
+            let wanted = if this.view_mode == ViewMode::Continuous {
                 this.continuous_dpi(this.viewport, page)
             } else {
                 this.base_dpi(page, 1)
-            }
+            };
+            this.budget_page_dpi(page, wanted, 48).unwrap_or(wanted)
         };
         // On-screen pages keep every cached density (they are never evicted).
         let reserved: usize = actual
@@ -126,6 +136,7 @@ impl ReaderApp {
             self.cache_config.page_bytes(),
             &candidates,
         );
+        self.raster.page_prefetch = plan.iter().map(|candidate| candidate.page).collect();
         for candidate in plan {
             self.request_cached_page(candidate.page, candidate.dpi, cx);
             if !continuous::render_ready(self.raster_jobs(), self.tile_slots) {
@@ -231,7 +242,12 @@ impl ReaderApp {
         }
         // A tile that cannot be reserved is skipped, not retried in a loop:
         // the plan re-runs when a running job returns or the view changes.
-        let Ok(reservation) = self.raster.reserve(bytes) else {
+        let estimate = bytes.saturating_mul(if self.rotation.is_multiple_of(4) {
+            1
+        } else {
+            2
+        });
+        let Ok(reservation) = self.raster.reserve(estimate) else {
             return false;
         };
         let epoch = self.render_epoch();
@@ -256,15 +272,11 @@ impl ReaderApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let info = this.raster.tasks.finish(ticket);
-                match &result {
-                    Ok((image, bytes)) => {
-                        this.raster.finish_reservation(reservation, image, *bytes);
-                    }
-                    Err(_) => this.raster.cancel_reservation(reservation),
-                }
+                this.raster.cancel_reservation(reservation);
                 if info.is_none() {
-                    // Cleared by a document switch or invalidation; the slot
-                    // was already forgotten, so the result is unusable.
+                    // An untracked/duplicate ticket cannot publish a result.
+                    // Document switches keep physical tickets until completion;
+                    // their stale epoch is checked below.
                 } else {
                     let still_wanted = this.tile_requests(true).contains(&key);
                     let within_budget = {
@@ -308,6 +320,7 @@ impl ReaderApp {
                                 &protected,
                             );
                             if accepted {
+                                this.raster.mark_registered(&image);
                                 this.gpu.borrow_mut().register(image);
                             }
                         }
@@ -323,20 +336,9 @@ impl ReaderApp {
                         }
                     }
                 }
-                // Next frame re-evaluates actual clipping before requesting work.
-                if this.view_mode == ViewMode::Single
-                    && this.raster.page_image.is_none()
-                    && this.raster.latest_render.is_none()
-                {
-                    this.request_page_render(cx);
-                }
-                // Prefetched tiles stay in the cache until they scroll in.
-                let visible = this
-                    .raster
-                    .tile_wanted
-                    .values()
-                    .any(|keys| keys.contains(&key));
-                this.finish_background(visible, cx);
+                // Next frame retires resources and recomputes actual clipping
+                // before requesting more work, even for stale/unused results.
+                this.finish_background(cx);
             });
         })
         .detach();

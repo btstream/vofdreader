@@ -5,11 +5,13 @@
 //! briefly holds while swapping one frame for another. Fonts, parsed pages,
 //! decoded images and GPU textures are outside it.
 //!
-//! The ledger has three parts:
+//! The ledger has two parts:
 //!
-//! - **Resident**: bitmaps reachable from a cache or from the on-screen slot.
+//! - **Resident**: bitmaps reachable from a cache, the on-screen slot or the
+//!   registry waiting for a window frame to retire it.
 //! - **Reserved**: pixels a running job will produce. Reserved before the
-//!   work starts and released only when the job actually returns.
+//!   work starts and released when the result is discarded or admitted. A
+//!   completed foreground replacement keeps its reservation until the frame.
 
 use std::collections::HashMap;
 
@@ -30,8 +32,8 @@ impl BudgetLimits {
     /// setting so work can start before its pixels exist; that in-flight
     /// allowance is transient and is released when the job returns.
     ///
-    /// Accounted bitmaps therefore stay within `setting * 1.25` in the worst
-    /// case; retained bitmaps alone stay within the setting.
+    /// These are accounting limits, not a bound on allocation peaks. Existing
+    /// owners and reservations can exceed newly lowered limits until retired.
     pub(crate) fn split(total_bytes: usize) -> Self {
         Self {
             resident_bytes: total_bytes,
@@ -70,7 +72,7 @@ pub(crate) struct Usage {
     pub(crate) reserved_bytes: usize,
 }
 
-/// Tracks three pools. Every mutation goes through a method so the totals
+/// Tracks two pools. Every mutation goes through a method so the totals
 /// cannot drift from the entries that justify them.
 #[derive(Default)]
 pub(crate) struct BudgetLedger {
@@ -109,8 +111,14 @@ impl BudgetLedger {
 
     pub(crate) fn usage(&self) -> Usage {
         Usage {
-            resident_bytes: self.resident.values().sum(),
-            reserved_bytes: self.reservations.values().sum(),
+            resident_bytes: self
+                .resident
+                .values()
+                .fold(0usize, |a, b| a.saturating_add(*b)),
+            reserved_bytes: self
+                .reservations
+                .values()
+                .fold(0usize, |a, b| a.saturating_add(*b)),
         }
     }
 
@@ -120,10 +128,11 @@ impl BudgetLedger {
         if bytes > self.limits.resident_bytes {
             return Err(BudgetRefusal::ExceedsPool);
         }
-        if self.resident.contains_key(&id) {
-            return Ok(());
-        }
-        if self.usage().resident_bytes + bytes <= self.limits.resident_bytes {
+        let others = self
+            .usage()
+            .resident_bytes
+            .saturating_sub(self.resident.get(&id).copied().unwrap_or(0));
+        if bytes <= self.limits.resident_bytes.saturating_sub(others) {
             Ok(())
         } else {
             Err(BudgetRefusal::NoResidentRoom)
@@ -147,18 +156,38 @@ impl BudgetLedger {
         self.resident.remove(&id);
     }
 
+    pub(crate) fn contains(&self, id: BitmapId) -> bool {
+        self.resident.contains_key(&id)
+    }
+
+    pub(crate) fn fits_resident_capacity(&self, bytes: usize) -> bool {
+        bytes <= self.limits.resident_bytes
+    }
+
     /// Reserves pixels before a job starts. Fails when the reservation pool
     /// would be exceeded; a single reservation larger than the pool is also
     /// refused, so an oversized page reports that immediately instead of
     /// failing after a full render.
     pub(crate) fn can_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
-        if bytes > self.limits.reserved_bytes {
-            return Err(BudgetRefusal::ExceedsPool);
-        }
-        if self.usage().reserved_bytes + bytes > self.limits.reserved_bytes {
+        self.can_ever_reserve(bytes)?;
+        if bytes
+            > self
+                .limits
+                .reserved_bytes
+                .saturating_sub(self.usage().reserved_bytes)
+        {
             return Err(BudgetRefusal::NoReserveRoom);
         }
         Ok(())
+    }
+
+    /// Permanent output capacity, independent of temporary job contention.
+    pub(crate) fn can_ever_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
+        if bytes > self.limits.reserved_bytes.min(self.limits.resident_bytes) {
+            Err(BudgetRefusal::ExceedsPool)
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
@@ -172,19 +201,6 @@ impl BudgetLedger {
     /// Gives back a reservation that produced nothing.
     pub(crate) fn cancel(&mut self, reservation: Reservation) {
         self.reservations.remove(&reservation.id);
-    }
-
-    /// Converts a finished job's reservation into a resident bitmap. The
-    /// reservation is always released; `admitted` reports whether the pixels
-    /// could be kept.
-    pub(crate) fn finish(
-        &mut self,
-        reservation: Reservation,
-        id: BitmapId,
-        actual_bytes: usize,
-    ) -> bool {
-        self.reservations.remove(&reservation.id);
-        self.admit(id, actual_bytes)
     }
 }
 
@@ -248,10 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn finishing_moves_the_reservation_into_the_resident_pool() {
+    fn completing_and_admitting_are_separate_operations() {
         let mut ledger = ledger();
         let reservation = ledger.reserve(20).unwrap();
-        assert!(ledger.finish(reservation, id(1), 20));
+        ledger.cancel(reservation);
+        assert_eq!(ledger.usage().resident_bytes, 0);
+        assert!(ledger.admit(id(1), 20));
         assert_eq!(ledger.usage().reserved_bytes, 0);
         assert_eq!(ledger.usage().resident_bytes, 20);
     }
@@ -261,7 +279,8 @@ mod tests {
         let mut ledger = ledger();
         assert!(ledger.admit(id(1), 90));
         let reservation = ledger.reserve(10).unwrap();
-        assert!(!ledger.finish(reservation, id(2), 20));
+        ledger.cancel(reservation);
+        assert!(!ledger.admit(id(2), 20));
         assert_eq!(ledger.usage().resident_bytes, 90);
         // The reservation is still released even when the pixels are dropped.
         assert_eq!(ledger.usage().reserved_bytes, 0);
@@ -295,5 +314,27 @@ mod tests {
     fn a_reservation_larger_than_the_pool_is_refused_up_front() {
         let mut ledger = ledger();
         assert_eq!(ledger.reserve(21), Err(BudgetRefusal::ExceedsPool));
+    }
+
+    #[test]
+    fn arithmetic_cannot_wrap_into_admission() {
+        let mut ledger = BudgetLedger::new(BudgetLimits {
+            resident_bytes: usize::MAX,
+            reserved_bytes: usize::MAX,
+        });
+        assert!(ledger.admit(id(1), usize::MAX));
+        assert!(!ledger.admit(id(2), 1));
+        let reservation = ledger.reserve(usize::MAX).unwrap();
+        assert_eq!(ledger.reserve(1), Err(BudgetRefusal::NoReserveRoom));
+        ledger.cancel(reservation);
+    }
+
+    #[test]
+    fn reusing_an_id_cannot_hide_a_larger_charge() {
+        let mut ledger = ledger();
+        assert!(ledger.admit(id(1), 40));
+        assert!(ledger.admit(id(2), 60));
+        assert!(!ledger.admit(id(1), 50));
+        assert_eq!(ledger.usage().resident_bytes, 100);
     }
 }

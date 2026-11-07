@@ -1,35 +1,62 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use resvg::tiny_skia as sk;
-
-use super::IMAGE_CACHE_BYTES;
 
 /// Decoded images shared across pages (templates and seals repeat).
 #[derive(Default)]
 pub(crate) struct ImageCache {
     entries: HashMap<(u64, usize), Arc<sk::Pixmap>>,
     bytes: usize,
+    order: VecDeque<(u64, usize)>,
 }
 
 impl ImageCache {
-    pub(crate) fn get_or_decode(&mut self, data: &[u8]) -> Option<Arc<sk::Pixmap>> {
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        while self.bytes > limit {
+            self.evict_oldest();
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(key) = self.order.pop_front()
+            && let Some(image) = self.entries.remove(&key)
+        {
+            self.bytes = self.bytes.saturating_sub(image.data().len());
+        }
+    }
+
+    pub(crate) fn get_or_decode(
+        &mut self,
+        data: &[u8],
+        limit: &AtomicUsize,
+    ) -> Option<Arc<sk::Pixmap>> {
+        self.set_limit(limit.load(Ordering::Relaxed));
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         data.hash(&mut hasher);
         let key = (hasher.finish(), data.len());
         if let Some(image) = self.entries.get(&key) {
+            self.order.retain(|entry| *entry != key);
+            self.order.push_back(key);
             return Some(image.clone());
         }
         let image = Arc::new(decode_raster(data)?);
         let size = image.data().len();
-        if self.bytes + size > IMAGE_CACHE_BYTES {
-            // Pages that still use an image keep their own Arc.
-            self.entries.clear();
-            self.bytes = 0;
+        let limit = limit.load(Ordering::Relaxed);
+        self.set_limit(limit);
+        // Decode is still necessary to paint a large source, but an oversized
+        // result must not defeat the retention limit or flush useful entries.
+        if size > limit {
+            return Some(image);
+        }
+        while size > limit.saturating_sub(self.bytes) {
+            self.evict_oldest();
         }
         self.bytes += size;
         self.entries.insert(key, image.clone());
+        self.order.push_back(key);
         Some(image)
     }
 }
@@ -102,5 +129,67 @@ pub(crate) fn premultiply_rgba(src: &[u8], dst: &mut [u8]) {
         dst[1] = (f64::from(src[1]) * alpha + 0.5) as u8;
         dst[2] = (f64::from(src[2]) * alpha + 0.5) as u8;
         dst[3] = src[3];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png(side: u32, value: u8) -> Vec<u8> {
+        let mut pixmap = sk::Pixmap::new(side, side).unwrap();
+        pixmap.fill(sk::Color::from_rgba8(value, 0, 0, 255));
+        pixmap.encode_png().unwrap()
+    }
+
+    #[test]
+    fn decoded_image_cache_evicts_lru_without_flushing_everything() {
+        let mut cache = ImageCache::default();
+        let limit = AtomicUsize::new(32);
+        let (a, b, c) = (png(2, 1), png(2, 2), png(2, 3));
+        let first = cache.get_or_decode(&a, &limit).unwrap();
+        let second = cache.get_or_decode(&b, &limit).unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache.get_or_decode(&a, &limit).unwrap()
+        ));
+        cache.get_or_decode(&c, &limit).unwrap();
+        assert_eq!(cache.bytes, 32);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache.get_or_decode(&a, &limit).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &second,
+            &cache.get_or_decode(&b, &limit).unwrap()
+        ));
+        limit.store(0, Ordering::Relaxed);
+        cache.get_or_decode(&a, &limit).unwrap();
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.entries.is_empty());
+        assert_eq!(
+            first.data().len(),
+            16,
+            "an active painter may still own an evicted source"
+        );
+    }
+
+    #[test]
+    fn oversized_decoded_source_is_painted_but_not_cached() {
+        let mut cache = ImageCache::default();
+        let limit = AtomicUsize::new(16);
+        let small = png(1, 1);
+        let kept = cache.get_or_decode(&small, &limit).unwrap();
+        let large = cache.get_or_decode(&png(4, 2), &limit).unwrap();
+        assert_eq!(large.data().len(), 64);
+        assert_eq!(cache.bytes, 4);
+        assert!(Arc::ptr_eq(
+            &kept,
+            &cache.get_or_decode(&small, &limit).unwrap()
+        ));
+        cache.set_limit(0);
+        assert!(cache.order.is_empty());
+        assert_eq!(cache.bytes, 0);
     }
 }

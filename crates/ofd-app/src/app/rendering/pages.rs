@@ -19,11 +19,21 @@ impl ReaderApp {
     /// current zoom (see `base_dpi`). Screen resolution is not considered.
     pub(crate) fn target_dpi(&self) -> u32 {
         let wanted = self.base_dpi(self.page, 1);
-        match self.raster.affordable_dpi {
-            // Do not keep asking for a density the budget already refused.
-            Some(allowed) => wanted.min(allowed),
-            None => wanted,
-        }
+        self.budget_page_dpi(self.page, wanted, 96)
+            .unwrap_or(wanted)
+    }
+
+    /// Resolve density against capacity, never against temporarily occupied
+    /// reservations. Both admission and cache keys use this same density.
+    pub(crate) fn budget_page_dpi(&self, page: usize, wanted: u32, floor: u32) -> Option<u32> {
+        let size = self
+            .active
+            .page_sizes
+            .get(page)
+            .copied()
+            .unwrap_or(SizeMm::new(210.0, 297.0));
+        self.raster
+            .affordable_page_dpi(size, wanted, floor, self.rotation)
     }
 
     /// Quality preset DPI at 100% zoom (质量档位).
@@ -61,14 +71,76 @@ impl ReaderApp {
     /// effect immediately; caches that are now over the limit are trimmed so a
     /// lowered setting converges without waiting for the next insertion.
     pub(crate) fn apply_cache_config(&mut self, config: cache_config::CacheConfig) {
+        if config.thumbnail_bytes() != self.cache_config.thumbnail_bytes() {
+            self.active.thumbnail_batch = self.active.thumbnail_batch.wrapping_add(1);
+            self.active.thumbs_started = false;
+            self.active.thumbs.fill(None);
+        }
         self.cache_config = config;
+        self.raster.page_prefetch.clear();
+        if let Some(renderer) = &self.active.renderer {
+            renderer.set_cache_limits(
+                config.parsed_page_limit(),
+                config.parsed_page_bytes(),
+                config.decoded_image_bytes(),
+            );
+        }
+        if self
+            .active
+            .error
+            .as_ref()
+            .is_some_and(|error| error.starts_with("页面位图"))
+        {
+            self.active.error = None;
+        }
         self.raster
             .set_budget_limits(app::memory_budget::BudgetLimits::split(
                 config.total_bytes(),
             ));
-        // A larger budget must be allowed to restore quality; a smaller one is
-        // re-evaluated by the next render.
-        self.raster.affordable_dpi = None;
+        if self.raster.budget.over_resident_limit() {
+            // Cached sharper frames must not defeat a required budget downgrade.
+            // The single-page screen remains owned until its replacement arrives.
+            let obsolete: Vec<_> = self
+                .raster
+                .page_cache
+                .keys()
+                .copied()
+                .filter(|&(page, dpi)| {
+                    let wanted = if self.view_mode == ViewMode::Single {
+                        self.base_dpi(page, 1)
+                    } else {
+                        self.continuous_dpi(self.viewport, page)
+                    };
+                    dpi > self
+                        .budget_page_dpi(
+                            page,
+                            wanted,
+                            if self.view_mode == ViewMode::Single {
+                                96
+                            } else {
+                                48
+                            },
+                        )
+                        .unwrap_or(0)
+                })
+                .collect();
+            for key in obsolete {
+                self.raster.remove_page(key);
+            }
+            if self.raster.image_dpi > self.target_dpi() {
+                self.raster.image_dpi = 0;
+            }
+        }
+        let obsolete_tiles: Vec<_> = self
+            .raster
+            .tile_cache
+            .keys()
+            .copied()
+            .filter(|key| self.tile_density(key.page) != Some(key.dpi))
+            .collect();
+        for key in obsolete_tiles {
+            self.raster.remove_tile(key);
+        }
         self.shrink_caches();
     }
 
@@ -147,7 +219,7 @@ impl ReaderApp {
             .any(|(cached_page, cached_dpi)| *cached_page == page && *cached_dpi >= dpi);
         if has_cached_at_least && let Some((cached_dpi, image)) = self.cached_page_image(page, dpi)
         {
-            self.raster.page_image = Some(image);
+            self.raster.set_page_image(Some(image));
             self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
             self.active.error = None;
@@ -173,7 +245,7 @@ impl ReaderApp {
             })
             && let Some((cached_dpi, image)) = self.cached_page_image(page, preview_dpi)
         {
-            self.raster.page_image = Some(image);
+            self.raster.set_page_image(Some(image));
             self.raster.image_dpi = cached_dpi;
             self.active.loading = false;
         }
@@ -208,11 +280,7 @@ impl ReaderApp {
             .get(page)
             .copied()
             .unwrap_or(SizeMm::new(210.0, 297.0));
-        let affordable = render_policy::affordable_dpi(dpi, 96.min(dpi), |probe| {
-            let estimate = render_policy::page_raster_estimate(size, probe, self.rotation);
-            self.raster.can_reserve(estimate).is_ok()
-        });
-        self.raster.affordable_dpi = affordable;
+        let affordable = self.budget_page_dpi(page, dpi, 96);
         let Some(dpi) = affordable else {
             self.active.loading = false;
             self.active.error = Some("页面位图超过缓存预算".to_string());
@@ -223,9 +291,8 @@ impl ReaderApp {
         let Ok(reservation) = self.raster.reserve(estimate) else {
             // The affordable check and the reservation can disagree only when
             // another job reserved in between; report instead of looping.
-            self.active.loading = false;
-            self.active.error = Some("渲染任务已用满内存预留".to_string());
-            cx.notify();
+            // Temporary contention is not a page error. Every completion
+            // wakes the foreground scheduler, including stale completions.
             return;
         };
 
@@ -269,7 +336,6 @@ impl ReaderApp {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.raster.tasks.finish(ticket);
-                        this.raster.finish_reservation(reservation, &image, bytes);
                         let acceptance =
                             render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
                                 job: epoch,
@@ -282,23 +348,41 @@ impl ReaderApp {
                                 displayed_dpi: this.raster.image_dpi,
                                 in_horizon: true,
                             });
-                        if acceptance.retention == render_policy::Retention::Keep {
-                            this.cache_page_image(page, dpi, image.clone(), bytes);
+                        if acceptance.replaces_screen() && this.view_mode == ViewMode::Single {
+                            if let Some(old) = this.raster.pending_page.take() {
+                                this.raster.cancel_reservation(old.reservation);
+                            }
+                            this.raster.pending_page = Some(app::raster_state::PendingPage {
+                                request,
+                                epoch,
+                                image,
+                                bytes,
+                                reservation,
+                            });
+                            this.active.font_reports.insert(page, font_report);
+                            if !this.active.thumbs_started {
+                                this.active.thumbs_started = true;
+                                this.spawn_thumbnails(cx);
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        this.raster.cancel_reservation(reservation);
+                        let retained = acceptance.retention == render_policy::Retention::Keep
+                            && this.cache_page_image(page, dpi, image.clone(), bytes);
+                        if retained {
                             this.active.font_reports.insert(page, font_report);
                         }
                         // A superseded request still warms the cache but must
                         // not clear loading, start thumbnails or repaint; the
                         // request that replaced it owns those.
                         if !request.is_latest(this.raster.latest_render) {
+                            this.wake_raster_scheduler(cx);
                             return;
                         }
                         this.raster.latest_render = None;
                         this.active.loading = false;
-                        if acceptance.replaces_screen() {
-                            this.raster.page_image = Some(image);
-                            this.raster.image_dpi = dpi;
-                            this.active.error = None;
-                        }
+                        this.wake_raster_scheduler(cx);
                         // Start thumbnails only after the main page is on
                         // screen, so they do not compete for CPU with the
                         // first paint.
@@ -327,6 +411,7 @@ impl ReaderApp {
                             });
                         if !acceptance.is_current() || !request.is_latest(this.raster.latest_render)
                         {
+                            this.wake_raster_scheduler(cx);
                             return;
                         }
                         this.raster.latest_render = None;
@@ -367,8 +452,7 @@ impl ReaderApp {
         dpi: u32,
         image: Arc<RenderImage>,
         bytes: usize,
-    ) {
-        self.gpu.borrow_mut().register(image.clone());
+    ) -> bool {
         // Pages on screen are never evicted, even when they alone exceed the
         // budget; otherwise two large visible pages evict each other forever.
         let (on_screen, count_limit) = if self.view_mode == ViewMode::Continuous {
@@ -387,7 +471,15 @@ impl ReaderApp {
             protected: (self.page, self.raster.image_dpi),
             on_screen,
         };
-        self.raster.cache_page(page, dpi, image, bytes, eviction);
+        if !self
+            .raster
+            .cache_page(page, dpi, image.clone(), bytes, eviction)
+        {
+            return false;
+        }
+        self.gpu.borrow_mut().register(image.clone());
+        self.raster.mark_registered(&image);
+        true
     }
 
     /// Renders thumbnails one at a time. Rendering them concurrently used to
@@ -434,11 +526,24 @@ impl ReaderApp {
                 }
                 let doc = doc.clone();
                 let renderer = renderer.clone();
+                let limits = this.update(cx, |this, _| {
+                    let size = this.active.page_sizes.get(page).copied()?;
+                    let bytes = this.cache_config.thumbnail_bytes() / count.max(1);
+                    let dpi = render_policy::thumbnail_dpi(
+                        size,
+                        count,
+                        this.cache_config.thumbnail_bytes(),
+                    )?;
+                    Some((dpi, bytes))
+                });
+                let Ok(Some((dpi, byte_limit))) = limits else {
+                    continue;
+                };
                 // Straight to a texture: no PNG encode, temp file or decode,
                 // and pages built only for a thumbnail are not cached.
                 let result = cx
                     .background_spawn(async move {
-                        let raster = renderer.rasterize_preview(&doc, page, THUMB_DPI).ok()?;
+                        let raster = renderer.rasterize_preview(&doc, page, dpi as f32).ok()?;
                         // Thumbnails are never rotated: they follow the page's
                         // own orientation in the sidebar.
                         super::worker::image_from_raster(
@@ -450,6 +555,7 @@ impl ReaderApp {
                             "缩略图缓冲区尺寸无效",
                         )
                         .ok()
+                        .filter(|(_, bytes)| *bytes <= byte_limit)
                         .map(|(image, _)| image)
                     })
                     .await;
@@ -482,6 +588,9 @@ impl ReaderApp {
     }
 
     pub(crate) fn request_cached_page(&mut self, page: usize, dpi: u32, cx: &mut Context<Self>) {
+        let Some(dpi) = self.budget_page_dpi(page, dpi, 48) else {
+            return;
+        };
         let target = TaskTarget::page(page, dpi);
         let admission = render_policy::CachedPageInput {
             page,
@@ -518,14 +627,19 @@ impl ReaderApp {
             .get(page)
             .copied()
             .unwrap_or(SizeMm::new(210.0, 297.0));
-        let dpi = match render_policy::affordable_dpi(dpi, 48.min(dpi), |probe| {
-            let estimate = render_policy::page_raster_estimate(size, probe, self.rotation);
-            self.raster.can_reserve(estimate).is_ok()
-        }) {
-            Some(dpi) => dpi,
-            None => return,
-        };
         let estimate = render_policy::page_raster_estimate(size, dpi, self.rotation);
+        let protected = if self.view_mode == ViewMode::Continuous {
+            self.continuous_content_range(self.viewport)
+        } else {
+            self.page..self.page.saturating_add(1)
+        };
+        if !self.raster.page_working_set_fits(
+            page,
+            render_policy::page_raster_estimate(size, dpi, 0),
+            protected,
+        ) {
+            return;
+        }
         let Ok(reservation) = self.raster.reserve(estimate) else {
             return;
         };
@@ -550,12 +664,7 @@ impl ReaderApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.raster.tasks.finish(ticket);
-                match &result {
-                    Ok((image, bytes)) => {
-                        this.raster.finish_reservation(reservation, image, *bytes);
-                    }
-                    Err(_) => this.raster.cancel_reservation(reservation),
-                }
+                this.raster.cancel_reservation(reservation);
                 let acceptance =
                     render_policy::accept_page_frame(render_policy::PageAcceptanceInput {
                         job: epoch,
@@ -567,9 +676,16 @@ impl ReaderApp {
                         image_missing: false,
                         result_dpi: dpi,
                         displayed_dpi: 0,
-                        in_horizon: this.nearby_page_range().contains(&page),
+                        in_horizon: this.nearby_page_range().contains(&page)
+                            && (this.raster.page_prefetch.contains(&page)
+                                || if this.view_mode == ViewMode::Continuous {
+                                    this.continuous_content_range(this.viewport).contains(&page)
+                                } else {
+                                    this.page == page
+                                }),
                     });
                 if !acceptance.is_current() {
+                    this.wake_raster_scheduler(cx);
                     return;
                 }
                 if result.is_err() {
@@ -584,14 +700,7 @@ impl ReaderApp {
                         this.spawn_thumbnails(cx);
                     }
                 }
-                if this.view_mode == ViewMode::Single
-                    && this.raster.page_image.is_none()
-                    && this.raster.latest_render.is_none()
-                {
-                    this.request_page_render(cx);
-                }
-                let visible = this.page_on_screen(page);
-                this.finish_background(visible, cx);
+                this.finish_background(cx);
             });
         })
         .detach();
@@ -626,25 +735,27 @@ impl ReaderApp {
         }
     }
 
-    /// A background raster job finished. Every notify repaints the whole
-    /// window, so only results that are on screen request one; otherwise the
-    /// next job is scheduled directly instead of through a frame.
-    pub(crate) fn finish_background(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.gpu.borrow_mut().background_done(visible);
-        if visible {
-            cx.notify();
-            return;
-        }
-        if self.view_mode == ViewMode::Continuous {
-            self.ensure_continuous_pages(self.viewport, cx);
-        }
-        self.schedule_nearby(cx);
+    /// All completions go through a window frame before more admission, so
+    /// delayed registry owners can retire and stale jobs can unblock the view.
+    pub(crate) fn finish_background(&mut self, cx: &mut Context<Self>) {
+        self.gpu.borrow_mut().background_done(true);
+        self.wake_raster_scheduler(cx);
     }
 
     /// Page and tile raster jobs in flight; together they share the
     /// configured render thread slots.
     pub(crate) fn raster_jobs(&self) -> usize {
         self.raster.tasks.len()
+    }
+
+    /// A freed physical slot belongs to the current view, not the job's epoch.
+    pub(crate) fn wake_raster_scheduler(&mut self, cx: &mut Context<Self>) {
+        // Defer actual admission to the next frame, after registry retirement.
+        // In particular, loading=true must not suppress a retry after stale work.
+        if self.raster.latest_render.is_none() && self.active.renderer.is_some() {
+            self.active.loading = false;
+        }
+        cx.notify();
     }
 
     /// Diagnostic line for the accounted bitmap pools. Printed only when the
@@ -666,9 +777,69 @@ impl ReaderApp {
     }
 
     pub(crate) fn sync_gpu_resources(&mut self, window: &mut Window) {
+        if let Some(pending) = self.raster.pending_page.take() {
+            let current = pending.epoch.matches(self.render_epoch())
+                && pending.request.is_latest(self.raster.latest_render)
+                && pending.request.page == self.page
+                && self.view_mode == ViewMode::Single
+                // The setting may have changed while this output was running.
+                // Drop it and re-plan, rather than turning a budget change into
+                // a persistent admission error.
+                && self.raster.can_ever_reserve(render_policy::page_raster_estimate(
+                    self.active.page_sizes.get(self.page).copied().unwrap_or(SizeMm::new(210.0,297.0)),
+                    pending.request.dpi, self.rotation,
+                )).is_ok();
+            if current {
+                // The completed replacement is still charged to its reservation.
+                // Retire the old displayed allocation inside this same frame,
+                // before admitting or drawing the new one.
+                self.raster.prepare_page_replacement(self.page);
+                self.reconcile_gpu_images(window);
+                let accepted = self.cache_page_image(
+                    self.page,
+                    pending.request.dpi,
+                    pending.image.clone(),
+                    pending.bytes,
+                );
+                if !accepted {
+                    // Cache eviction may just have retired off-screen registry
+                    // owners. Reconcile once, never spin while waiting for them.
+                    self.reconcile_gpu_images(window);
+                }
+                let accepted = accepted
+                    || self.cache_page_image(
+                        self.page,
+                        pending.request.dpi,
+                        pending.image.clone(),
+                        pending.bytes,
+                    );
+                if accepted {
+                    self.raster.set_page_image(Some(pending.image));
+                    self.raster.image_dpi = pending.request.dpi;
+                    self.active.error = None;
+                } else {
+                    self.raster.image_dpi = 0;
+                    self.active.error = Some("页面位图无法放入当前缓存预算".to_string());
+                }
+                self.raster.latest_render = None;
+                self.active.loading = false;
+            }
+            if !current && pending.request.is_latest(self.raster.latest_render) {
+                self.raster.latest_render = None;
+                self.active.loading = false;
+            }
+            self.raster.cancel_reservation(pending.reservation);
+        }
         if self.gpu.borrow().options.diagnostics {
             eprintln!("{}", self.budget_diagnostic());
         }
+        self.reconcile_gpu_images(window);
+        self.gpu
+            .borrow_mut()
+            .frame(self.raster.page_cache_bytes + self.raster.tile_bytes);
+    }
+
+    fn reconcile_gpu_images(&mut self, window: &mut Window) {
         let mut live: HashSet<_> = self
             .raster
             .page_cache
@@ -683,8 +854,8 @@ impl ReaderApp {
         self.gpu
             .borrow_mut()
             .reconcile(&live, |image| window.drop_image(image).is_ok());
-        self.gpu
-            .borrow_mut()
-            .frame(self.raster.page_cache_bytes + self.raster.tile_bytes);
+        let gpu = self.gpu.borrow();
+        self.raster
+            .reconcile_registered(|id| gpu.contains_image(id.0));
     }
 }

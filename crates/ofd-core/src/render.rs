@@ -2,6 +2,7 @@ mod display;
 #[cfg(test)]
 pub(crate) use display::seal_appearance;
 mod fonts;
+mod memory;
 mod parse;
 mod raster;
 mod renderer;

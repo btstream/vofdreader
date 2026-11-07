@@ -230,6 +230,7 @@ impl ReaderApp {
     ) -> AnyElement {
         self.ensure_continuous_pages(viewport, cx);
         let range = self.continuous_visible_range(viewport);
+        let actual = self.continuous_content_range(viewport);
         let (top, bottom, width, page_gap) = self.with_continuous_layout(viewport, |layout| {
             let (top, bottom) = layout.spacers(range.clone());
             (
@@ -244,8 +245,10 @@ impl ReaderApp {
             let dpi = self.continuous_dpi(viewport, index);
             // Keep the old bitmap while scrolling/zooming; refinement waits
             // until idle. Only visible rows touch the LRU or clone images.
-            let image = self
-                .cached_page_image(index, dpi)
+            let image = actual
+                .contains(&index)
+                .then(|| self.cached_page_image(index, dpi))
+                .flatten()
                 .map(|(_, image)| image)
                 .or_else(|| {
                     let key = self
@@ -256,7 +259,9 @@ impl ReaderApp {
                         .max_by_key(|(_, dpi)| *dpi)
                         .copied()?;
                     let image = self.raster.page_cache.get(&key).cloned();
-                    self.touch_cached_page(key.0, key.1);
+                    if actual.contains(&index) {
+                        self.touch_cached_page(key.0, key.1);
+                    }
                     image
                 });
             let height = self.continuous_page_size(viewport, index).1;

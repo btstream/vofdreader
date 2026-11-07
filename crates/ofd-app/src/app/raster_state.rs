@@ -10,12 +10,13 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::app::memory_budget::{BitmapId, BudgetLedger, BudgetLimits, BudgetRefusal, Reservation};
-use crate::app::render_policy::PageRequest;
-use crate::app::task_state::InFlightTasks;
+use crate::app::render_policy::{self, PageRequest};
+use crate::app::task_state::{InFlightTasks, RenderEpoch};
 use crate::tiles;
 use gpui_kit::RenderImage;
 
 pub(crate) struct RasterState {
+    pub(crate) pending_page: Option<PendingPage>,
     /// Bitmap currently on screen. Kept across an image-filter change until
     /// its replacement arrives; `image_dpi = 0` forces a re-render.
     pub(crate) page_image: Option<Arc<RenderImage>>,
@@ -23,6 +24,9 @@ pub(crate) struct RasterState {
     pub(crate) page_cache: HashMap<(usize, u32), Arc<RenderImage>>,
     pub(crate) page_cache_order: VecDeque<(usize, u32)>,
     pub(crate) page_cache_bytes: usize,
+    /// The entire affordable neighbour plan, not just the next insertion.
+    /// Protect it from unrelated LRU touches by buffered continuous rows.
+    pub(crate) page_prefetch: HashSet<usize>,
     pub(crate) tile_cache: HashMap<tiles::Key, Arc<RenderImage>>,
     pub(crate) tile_order: VecDeque<tiles::Key>,
     pub(crate) tile_bytes: usize,
@@ -38,15 +42,23 @@ pub(crate) struct RasterState {
     pub(crate) dpi_debounce_gen: u64,
     /// Page jobs that failed at this density and must not be retried.
     pub(crate) continuous_failed: HashSet<(usize, u32)>,
-    /// Density the budget last allowed for the visible single page. The view
-    /// asks for more only when the target rises above this, so a page that was
-    /// deliberately rendered softer does not trigger an endless upgrade loop.
-    pub(crate) affordable_dpi: Option<u32>,
+    // Registry ownership outlives cache eviction until the next window frame.
+    registered: HashSet<BitmapId>,
     /// Raster jobs currently occupying a worker slot.
     pub(crate) tasks: InFlightTasks,
     /// Bitmap accounting shared by the caches, the on-screen slot and the
     /// jobs that are still rendering.
     pub(crate) budget: BudgetLedger,
+}
+
+/// A completed foreground output remains reserved until a window frame can
+/// retire registry ownership and atomically replace the displayed bitmap.
+pub(crate) struct PendingPage {
+    pub(crate) request: PageRequest,
+    pub(crate) epoch: RenderEpoch,
+    pub(crate) image: Arc<RenderImage>,
+    pub(crate) bytes: usize,
+    pub(crate) reservation: Reservation,
 }
 
 /// Limits and protected entries for one page-cache insertion.
@@ -63,11 +75,13 @@ impl RasterState {
     /// Builds a state whose ledger starts with the user's cache setting.
     pub(crate) fn with_budget(limits: BudgetLimits) -> Self {
         Self {
+            pending_page: None,
             page_image: None,
             image_dpi: 0,
             page_cache: HashMap::new(),
             page_cache_order: VecDeque::new(),
             page_cache_bytes: 0,
+            page_prefetch: HashSet::new(),
             tile_cache: HashMap::new(),
             tile_order: VecDeque::new(),
             tile_bytes: 0,
@@ -80,7 +94,7 @@ impl RasterState {
             dpi_pending: false,
             dpi_debounce_gen: 0,
             continuous_failed: HashSet::new(),
-            affordable_dpi: None,
+            registered: HashSet::new(),
             tasks: InFlightTasks::new(),
             budget: BudgetLedger::new(limits),
         }
@@ -100,30 +114,111 @@ impl RasterState {
     }
 
     /// Reserves the pixels a job will produce before it starts. The caller
-    /// must hand the reservation back with [`Self::finish_reservation`] or
-    /// [`Self::cancel_reservation`] when the closure returns.
+    /// must release the reservation when the closure returns, then separately
+    /// admit the result only if it is still useful.
     pub(crate) fn reserve(&mut self, bytes: usize) -> Result<Reservation, BudgetRefusal> {
         self.budget.reserve(bytes)
     }
 
-    /// Whether `bytes` could be reserved right now, without taking it.
-    pub(crate) fn can_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
-        self.budget.can_reserve(bytes)
+    /// Whether `bytes` fits the configured capacity, ignoring temporary jobs.
+    pub(crate) fn can_ever_reserve(&self, bytes: usize) -> Result<(), BudgetRefusal> {
+        self.budget.can_ever_reserve(bytes)
+    }
+
+    pub(crate) fn affordable_page_dpi(
+        &self,
+        size: ofd_core::SizeMm,
+        wanted: u32,
+        floor: u32,
+        rotation: u8,
+    ) -> Option<u32> {
+        render_policy::affordable_dpi(wanted, floor.min(wanted), |dpi| {
+            self.can_ever_reserve(render_policy::page_raster_estimate(size, dpi, rotation))
+                .is_ok()
+        })
+    }
+
+    /// Avoid rasterizing a background frame that cannot coexist with the
+    /// protected working set even after off-screen/retired owners are gone.
+    pub(crate) fn page_working_set_fits(
+        &self,
+        page: usize,
+        bytes: usize,
+        on_screen: Range<usize>,
+    ) -> bool {
+        let mut seen = HashSet::new();
+        let mut retained = bytes;
+        for ((cached_page, _), image) in &self.page_cache {
+            if *cached_page != page && on_screen.contains(cached_page) && seen.insert(image.id) {
+                retained = retained.saturating_add(image_bytes(image));
+            }
+        }
+        if let Some(image) = &self.page_image
+            && seen.insert(image.id)
+        {
+            retained = retained.saturating_add(image_bytes(image));
+        }
+        for image in self
+            .tile_wanted
+            .values()
+            .flatten()
+            .filter_map(|key| self.tile_cache.get(key))
+        {
+            if seen.insert(image.id) {
+                retained = retained.saturating_add(image_bytes(image));
+            }
+        }
+        self.budget.fits_resident_capacity(retained)
     }
 
     pub(crate) fn cancel_reservation(&mut self, reservation: Reservation) {
         self.budget.cancel(reservation);
     }
 
-    /// Settles a finished job. Returns whether the pixels were kept.
-    pub(crate) fn finish_reservation(
-        &mut self,
-        reservation: Reservation,
-        image: &RenderImage,
-        actual_bytes: usize,
-    ) -> bool {
-        self.budget
-            .finish(reservation, Self::bitmap_id(image), actual_bytes)
+    pub(crate) fn mark_registered(&mut self, image: &RenderImage) {
+        self.registered.insert(Self::bitmap_id(image));
+    }
+
+    /// Called after atlas reconciliation (or explicit registry teardown).
+    pub(crate) fn reconcile_registered(&mut self, retained: impl Fn(BitmapId) -> bool) {
+        let retired: Vec<_> = self
+            .registered
+            .iter()
+            .copied()
+            .filter(|id| !retained(*id))
+            .collect();
+        for id in retired {
+            self.registered.remove(&id);
+            self.release_if_unreferenced(id);
+        }
+    }
+
+    /// Refused/never-admitted pixels must never become the displayed frame.
+    pub(crate) fn set_page_image(&mut self, image: Option<Arc<RenderImage>>) -> bool {
+        if image
+            .as_ref()
+            .is_some_and(|image| !self.budget.contains(Self::bitmap_id(image)))
+        {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.page_image, image);
+        if let Some(old) = old {
+            self.release_if_unreferenced(Self::bitmap_id(&old));
+        }
+        true
+    }
+
+    pub(crate) fn prepare_page_replacement(&mut self, page: usize) {
+        self.set_page_image(None);
+        let keys: Vec<_> = self
+            .page_cache
+            .keys()
+            .copied()
+            .filter(|key| key.0 == page)
+            .collect();
+        for key in keys {
+            self.remove_page(key);
+        }
     }
 
     /// Drops caches and marks in-flight results stale, while keeping the
@@ -134,23 +229,33 @@ impl RasterState {
     /// would make the budget believe memory had been freed and allow work that
     /// cannot actually run in parallel.
     pub(crate) fn invalidate(&mut self) {
+        if let Some(pending) = self.pending_page.take() {
+            self.cancel_reservation(pending.reservation);
+        }
         self.view_generation = self.view_generation.wrapping_add(1);
         self.render_seq = self.render_seq.wrapping_add(1);
         self.latest_render = None;
         self.image_dpi = 0;
+        let released: Vec<_> = self
+            .page_cache
+            .values()
+            .map(|image| Self::bitmap_id(image))
+            .collect();
         self.page_cache.clear();
         self.page_cache_order.clear();
+        self.page_prefetch.clear();
         self.page_cache_bytes = 0;
         self.clear_tiles();
         self.continuous_failed.clear();
-        self.affordable_dpi = None;
+        for id in released {
+            self.release_if_unreferenced(id);
+        }
     }
 
     /// Returns to the empty state when a document is closed or replaced.
     pub(crate) fn reset(&mut self) {
         self.invalidate();
-        self.page_image = None;
-        self.affordable_dpi = None;
+        self.set_page_image(None);
         self.dpi_pending = false;
         self.dpi_debounce_gen = self.dpi_debounce_gen.wrapping_add(1);
     }
@@ -220,23 +325,39 @@ impl RasterState {
         }
 
         let bitmap = Self::bitmap_id(&image);
-        // Nothing is charged until the languages accept: make room first, then
+        // Nothing is charged until admission: make room first, then
         // admit, so a rejected frame leaves no residue.
         self.evict_until_admissible(bitmap, bytes, &eviction, key);
+        if !eviction.on_screen.contains(&page)
+            && (self.page_cache.len().saturating_add(1) > eviction.count_limit
+                || bytes > eviction.byte_limit.saturating_sub(self.page_cache_bytes))
+        {
+            // A late speculative result cannot exceed the plan's cache slice
+            // just because all useful entries are now protected.
+            return false;
+        }
+        if self.budget.can_admit(bitmap, bytes).is_err() {
+            let visible: HashSet<_> = self.tile_wanted.values().flatten().copied().collect();
+            let expendable: Vec<_> = self
+                .tile_order
+                .iter()
+                .copied()
+                .filter(|key| !visible.contains(key))
+                .collect();
+            for key in expendable {
+                if self.budget.can_admit(bitmap, bytes).is_ok() {
+                    break;
+                }
+                self.remove_tile(key);
+            }
+        }
         if !self.budget.admit(bitmap, bytes) {
             return false;
         }
 
         if let Some(old) = self.page_cache.insert(key, image) {
             let old_id = Self::bitmap_id(&old);
-            if !self.page_cache.values().any(|kept| kept.id == old.id)
-                && self
-                    .page_image
-                    .as_ref()
-                    .is_none_or(|shown| shown.id != old.id)
-            {
-                self.budget.release(old_id);
-            }
+            self.release_if_unreferenced(old_id);
         }
         self.page_cache_bytes = self
             .page_cache
@@ -260,10 +381,18 @@ impl RasterState {
             return 0;
         }
         // Prefetched tiles are the least valuable resident pixels.
-        while over(self) {
-            let Some(key) = self.tile_order.pop_front() else {
+        let visible_tiles: HashSet<_> = self.tile_wanted.values().flatten().copied().collect();
+        let mut tile_candidates: Vec<_> = self.tile_order.iter().copied().collect();
+        tile_candidates.sort_by_key(|key| visible_tiles.contains(key));
+        for key in tile_candidates {
+            if !over(self) {
                 break;
-            };
+            }
+            // Visible tiles stay until the view's new density plan replaces them.
+            if visible_tiles.contains(&key) {
+                continue;
+            }
+            self.tile_order.retain(|entry| *entry != key);
             if let Some(image) = self.tile_cache.remove(&key) {
                 self.tile_bytes = self
                     .tile_cache
@@ -275,16 +404,17 @@ impl RasterState {
             }
         }
         // Then off-screen page bitmaps, oldest first.
-        while over(self) {
+        let candidates = self.page_cache_order.len();
+        for _ in 0..candidates {
+            if !over(self) {
+                break;
+            }
             let Some(key) = self.page_cache_order.pop_front() else {
                 break;
             };
             let visible = key.0 == current || on_screen.contains(&key.0);
             if visible {
                 self.page_cache_order.push_back(key);
-                if self.page_cache_order.len() == 1 {
-                    break;
-                }
                 continue;
             }
             self.remove_page(key);
@@ -320,7 +450,10 @@ impl RasterState {
                 break;
             };
             let keep = |entry: &(usize, u32)| {
-                *entry == key || *entry == protected || on_screen.contains(&entry.0)
+                *entry == key
+                    || *entry == protected
+                    || on_screen.contains(&entry.0)
+                    || self.page_prefetch.contains(&entry.0)
             };
             if keep(&oldest) {
                 self.page_cache_order.push_back(oldest);
@@ -333,22 +466,14 @@ impl RasterState {
         }
     }
 
-    fn remove_page(&mut self, key: (usize, u32)) {
+    pub(crate) fn remove_page(&mut self, key: (usize, u32)) {
         if let Some(old) = self.page_cache.remove(&key) {
             self.page_cache_bytes = self
                 .page_cache
                 .values()
                 .map(|image| image_bytes(image))
                 .sum();
-            let still_owned = self
-                .page_image
-                .as_ref()
-                .is_some_and(|shown| shown.id == old.id)
-                || self.tile_cache.values().any(|tile| tile.id == old.id)
-                || self.page_cache.values().any(|kept| kept.id == old.id);
-            if !still_owned {
-                self.budget.release(Self::bitmap_id(&old));
-            }
+            self.release_if_unreferenced(Self::bitmap_id(&old));
         }
         self.page_cache_order.retain(|existing| *existing != key);
     }
@@ -371,13 +496,26 @@ impl RasterState {
         }
     }
 
+    pub(crate) fn remove_tile(&mut self, key: tiles::Key) {
+        if let Some(image) = self.tile_cache.remove(&key) {
+            self.tile_order.retain(|entry| *entry != key);
+            self.tile_bytes = self
+                .tile_cache
+                .values()
+                .map(|image| image_bytes(image))
+                .sum();
+            self.release_if_unreferenced(Self::bitmap_id(&image));
+        }
+    }
+
     /// Releases a ledger entry only when no cache or on-screen slot still
     /// holds the same allocation.
     fn release_if_unreferenced(&mut self, id: BitmapId) {
-        let referenced = self
-            .page_cache
-            .values()
-            .any(|image| Self::bitmap_id(image) == id)
+        let referenced = self.registered.contains(&id)
+            || self
+                .page_cache
+                .values()
+                .any(|image| Self::bitmap_id(image) == id)
             || self
                 .page_image
                 .as_ref()
@@ -424,7 +562,10 @@ impl RasterState {
         if self.tile_bytes + bytes > limit || !self.budget.admit(bitmap, bytes) {
             return false;
         }
-        self.tile_cache.insert(key, image);
+        if let Some(old) = self.tile_cache.insert(key, image) {
+            self.release_if_unreferenced(Self::bitmap_id(&old));
+        }
+        self.tile_order.retain(|entry| *entry != key);
         self.tile_order.push_back(key);
         self.tile_bytes = self
             .tile_cache
@@ -466,25 +607,25 @@ mod tests {
     #[test]
     fn page_cache_never_evicts_the_bitmap_that_produced_the_insert() {
         let mut state = RasterState::with_budget(BudgetLimits::split(4));
-        state.cache_page(0, 96, render_image(1, 1), 0, eviction((0, 96)));
+        state.cache_page(0, 96, render_image(1, 1), 4, eviction((0, 96)));
         // A second insertion is over both limits, but the new entry is
         // protected; the older one is evicted instead.
-        state.cache_page(1, 96, render_image(1, 1), 0, eviction((1, 96)));
+        state.cache_page(1, 96, render_image(1, 1), 4, eviction((1, 96)));
         assert!(state.page_cache.contains_key(&(1, 96)));
         assert_eq!(state.page_cache.len(), 1);
     }
 
     #[test]
     fn on_screen_pages_survive_a_tight_budget() {
-        let mut state = RasterState::with_budget(BudgetLimits::split(4));
+        let mut state = RasterState::with_budget(BudgetLimits::split(8));
         let eviction = || PageEviction {
             count_limit: 1,
             byte_limit: 4,
             protected: (0, 96),
             on_screen: 0..2,
         };
-        state.cache_page(0, 96, render_image(1, 1), 0, eviction());
-        state.cache_page(1, 96, render_image(1, 1), 0, eviction());
+        assert!(state.cache_page(0, 96, render_image(1, 1), 4, eviction()));
+        assert!(state.cache_page(1, 96, render_image(1, 1), 4, eviction()));
         assert!(state.page_cache.contains_key(&(0, 96)));
         assert!(state.page_cache.contains_key(&(1, 96)));
     }
@@ -498,8 +639,8 @@ mod tests {
             protected: (page, 0),
             on_screen: 0..0,
         };
-        state.cache_page(0, 96, render_image(1, 1), 0, eviction(0));
-        state.cache_page(0, 192, render_image(1, 1), 0, eviction(0));
+        state.cache_page(0, 96, render_image(1, 1), 4, eviction(0));
+        state.cache_page(0, 192, render_image(1, 1), 4, eviction(0));
         assert!(!state.page_cache.contains_key(&(0, 96)));
         assert!(state.page_cache.contains_key(&(0, 192)));
     }
@@ -507,13 +648,13 @@ mod tests {
     #[test]
     fn invalidate_keeps_the_visible_bitmap_until_its_replacement() {
         let mut state = RasterState::with_budget(BudgetLimits::split(4));
-        state.page_image = Some(render_image(2, 2));
+        let image = render_image(1, 1);
         state.image_dpi = 192;
         state.cache_page(
             0,
             192,
-            render_image(1, 1),
-            0,
+            image,
+            4,
             PageEviction {
                 count_limit: 8,
                 byte_limit: 1 << 20,
@@ -521,10 +662,14 @@ mod tests {
                 on_screen: 0..0,
             },
         );
+        state.set_page_image(state.page_cache.get(&(0, 192)).cloned());
         state.invalidate();
         assert!(state.page_image.is_some());
         assert_eq!(state.image_dpi, 0);
         assert!(state.page_cache.is_empty());
+        assert_eq!(state.budget.usage().resident_bytes, 4);
+        state.set_page_image(None);
+        assert_eq!(state.budget.usage().resident_bytes, 0);
     }
 
     #[test]
@@ -536,6 +681,258 @@ mod tests {
         state.reset();
         assert!(state.page_image.is_none());
         assert!(state.dpi_debounce_gen > debounce);
+    }
+
+    fn roomy(protected: (usize, u32)) -> PageEviction {
+        PageEviction {
+            count_limit: 8,
+            byte_limit: 4096,
+            protected,
+            on_screen: 0..0,
+        }
+    }
+
+    #[test]
+    fn reset_releases_pixels_but_preserves_physical_jobs() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let image = render_image(2, 2);
+        assert!(state.cache_page(0, 96, image.clone(), 16, roomy((0, 96))));
+        state.set_page_image(Some(image));
+        let reservation = state.reserve(16).unwrap();
+        let ticket = state.tasks.start(
+            crate::app::task_state::TaskTarget::page(1, 96),
+            16,
+            RenderEpoch::default(),
+        );
+        state.reset();
+        assert_eq!(state.budget.usage().resident_bytes, 0);
+        assert_eq!(state.budget.usage().reserved_bytes, 16);
+        assert_eq!(state.tasks.len(), 1);
+        state.tasks.finish(ticket);
+        state.cancel_reservation(reservation);
+        assert_eq!(state.budget.usage().reserved_bytes, 0);
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn discarded_output_never_becomes_resident() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let reservation = state.reserve(16).unwrap();
+        state.invalidate();
+        let result = render_image(2, 2);
+        state.cancel_reservation(reservation);
+        drop(result);
+        assert_eq!(state.budget.usage().resident_bytes, 0);
+        assert_eq!(state.budget.usage().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn registry_retirement_not_cache_eviction_releases_registered_pixels() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(16));
+        let image = render_image(2, 2);
+        assert!(state.cache_page(0, 96, image.clone(), 16, roomy((0, 96))));
+        state.mark_registered(&image);
+        state.set_page_image(Some(image));
+        state.invalidate();
+        state.set_page_image(None);
+        assert_eq!(state.budget.usage().resident_bytes, 16);
+        state.reconcile_registered(|_| true); // failed atlas drop: still owned
+        assert_eq!(state.budget.usage().resident_bytes, 16);
+        state.reconcile_registered(|_| false);
+        assert_eq!(state.budget.usage().resident_bytes, 0);
+    }
+
+    #[test]
+    fn replacing_screen_and_same_key_tile_does_not_leak_the_old_allocation() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let old = render_image(1, 1);
+        assert!(state.cache_page(0, 96, old.clone(), 4, roomy((0, 96))));
+        state.set_page_image(Some(old));
+        assert!(state.cache_page(0, 192, render_image(1, 1), 4, roomy((0, 192))));
+        assert_eq!(state.budget.usage().resident_bytes, 8);
+        state.set_page_image(state.page_cache.get(&(0, 192)).cloned());
+        assert_eq!(state.budget.usage().resident_bytes, 4);
+        let key = tiles::Key {
+            page: 0,
+            dpi: 192,
+            x: 0,
+            y: 0,
+        };
+        assert!(state.cache_tile(key, render_image(1, 1), 4, 64, &[]));
+        assert!(state.cache_tile(key, render_image(1, 1), 4, 64, &[]));
+        assert_eq!(state.budget.usage().resident_bytes, 8);
+        assert_eq!(state.tile_order.len(), 1);
+    }
+
+    #[test]
+    fn shrinking_multiple_protected_pages_terminates_even_when_over_budget() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        for page in 0..2 {
+            assert!(state.cache_page(page, 96, render_image(2, 2), 16, roomy((page, 96))));
+        }
+        state.set_budget_limits(BudgetLimits::split(16));
+        assert_eq!(state.shrink_to_budget(0..2, 0), 0);
+        assert_eq!(state.page_cache.len(), 2);
+        assert_eq!(state.budget.usage().resident_bytes, 32);
+    }
+
+    #[test]
+    fn shrinking_does_not_evict_visible_tiles_as_prefetch() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let visible = tiles::Key {
+            page: 0,
+            dpi: 96,
+            x: 0,
+            y: 0,
+        };
+        let prefetch = tiles::Key { x: 1, ..visible };
+        assert!(state.cache_tile(visible, render_image(2, 2), 16, 64, &[]));
+        assert!(state.cache_tile(prefetch, render_image(2, 2), 16, 64, &[]));
+        state.tile_wanted.insert(0, vec![visible]);
+        state.set_budget_limits(BudgetLimits::split(16));
+        assert_eq!(state.shrink_to_budget(0..1, 0), 1);
+        assert!(state.tile_cache.contains_key(&visible));
+        assert!(!state.tile_cache.contains_key(&prefetch));
+    }
+
+    #[test]
+    fn density_keys_ignore_temporary_contention_and_recover_with_capacity() {
+        let size = ofd_core::SizeMm::new(210.0, 297.0);
+        let capacity = render_policy::page_raster_estimate(size, 144, 0);
+        let mut state = RasterState::with_budget(BudgetLimits {
+            resident_bytes: capacity * 4,
+            reserved_bytes: capacity,
+        });
+        let resolved = state.affordable_page_dpi(size, 384, 96, 0).unwrap();
+        assert_eq!(resolved, 144);
+        let reservation = state.reserve(capacity).unwrap();
+        assert_eq!(state.affordable_page_dpi(size, 384, 96, 0), Some(resolved));
+        let target = crate::app::task_state::TaskTarget::page(0, resolved);
+        let ticket = state.tasks.start(target, capacity, RenderEpoch::default());
+        assert!(state.tasks.contains_current(target, RenderEpoch::default()));
+        state.tasks.finish(ticket);
+        state.cancel_reservation(reservation);
+        assert!(state.cache_page(0, resolved, render_image(1, 1), 4, roomy((0, resolved))));
+        assert!(
+            state
+                .cached_page(0, state.affordable_page_dpi(size, 384, 96, 0).unwrap())
+                .is_some()
+        );
+        assert_eq!(state.affordable_page_dpi(size, 96, 96, 0), Some(96));
+        assert_eq!(
+            state.affordable_page_dpi(ofd_core::SizeMm::new(50.0, 50.0), 384, 96, 0),
+            Some(384)
+        );
+        state.set_budget_limits(BudgetLimits::split(capacity * 16));
+        assert!(state.affordable_page_dpi(size, 384, 96, 0).unwrap() > resolved);
+    }
+
+    #[test]
+    fn pending_replacement_stays_reserved_and_invalidation_cancels_it() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let reservation = state.reserve(16).unwrap();
+        state.pending_page = Some(PendingPage {
+            request: PageRequest {
+                seq: 1,
+                page: 0,
+                dpi: 96,
+            },
+            epoch: RenderEpoch::default(),
+            image: render_image(2, 2),
+            bytes: 16,
+            reservation,
+        });
+        assert_eq!(state.budget.usage().reserved_bytes, 16);
+        assert_eq!(state.budget.usage().resident_bytes, 0);
+        state.invalidate();
+        assert!(state.pending_page.is_none());
+        assert_eq!(state.budget.usage().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn replacement_after_lowering_budget_retires_old_registry_before_display() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(256));
+        let old = render_image(4, 4);
+        assert!(state.cache_page(0, 192, old.clone(), 64, roomy((0, 192))));
+        state.mark_registered(&old);
+        assert!(state.set_page_image(Some(old)));
+        state.set_budget_limits(BudgetLimits::split(16));
+        let reservation = state.reserve(4).unwrap();
+        let next = render_image(1, 1);
+        assert!(
+            !state.set_page_image(Some(next.clone())),
+            "not admitted yet"
+        );
+        state.prepare_page_replacement(0);
+        assert!(!state.cache_page(0, 96, next.clone(), 4, roomy((0, 96))));
+        assert!(
+            !state.set_page_image(Some(next.clone())),
+            "registry still owns old pixels"
+        );
+        assert_eq!(state.budget.usage().reserved_bytes, 4);
+        state.reconcile_registered(|_| false);
+        assert!(state.cache_page(0, 96, next.clone(), 4, roomy((0, 96))));
+        assert!(state.set_page_image(Some(next)));
+        state.cancel_reservation(reservation);
+        assert_eq!(state.budget.usage().resident_bytes, 4);
+        assert_eq!(state.budget.usage().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn impossible_background_working_set_is_rejected_before_rasterizing() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(32));
+        let shown = render_image(2, 2);
+        assert!(state.cache_page(0, 96, shown.clone(), 16, roomy((0, 96))));
+        state.set_page_image(Some(shown));
+        assert!(state.page_working_set_fits(1, 16, 0..1));
+        assert!(!state.page_working_set_fits(1, 20, 0..1));
+        assert_eq!(state.budget.usage().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn foreground_page_can_reclaim_speculative_tile_capacity() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(16));
+        let tile = tiles::Key {
+            page: 1,
+            dpi: 192,
+            x: 0,
+            y: 0,
+        };
+        assert!(state.cache_tile(tile, render_image(2, 2), 16, 16, &[]));
+        assert!(state.cache_page(0, 96, render_image(1, 1), 4, roomy((0, 96))));
+        assert!(state.tile_cache.is_empty());
+        assert_eq!(state.budget.usage().resident_bytes, 4);
+    }
+
+    #[test]
+    fn affordable_prefetch_plan_survives_buffered_row_lru_touches() {
+        let mut state = RasterState::with_budget(BudgetLimits::split(64));
+        let eviction = || PageEviction {
+            count_limit: 12,
+            byte_limit: 48,
+            protected: (2, 0),
+            on_screen: 2..3,
+        };
+        for page in [2, 3, 0] {
+            assert!(state.cache_page(page, 168, render_image(2, 2), 16, eviction()));
+        }
+        // The viewport needs page 2 and can afford neighbours 0 and 1. A
+        // buffered row for page 3 used to displace these neighbours forever.
+        state.page_prefetch.extend([0, 1]);
+        state.touch_page(3, 168);
+        assert!(state.cache_page(1, 168, render_image(2, 2), 16, eviction()));
+        assert!(!state.page_cache.contains_key(&(3, 168)));
+        assert!(
+            !state.cache_page(3, 168, render_image(2, 2), 16, eviction()),
+            "late off-plan output cannot evict the affordable working set"
+        );
+        for _ in 0..100 {
+            for page in [0, 1, 2] {
+                assert!(state.cached_page(page, 168).is_some());
+            }
+        }
+        assert_eq!(state.page_cache.len(), 3);
+        assert_eq!(state.budget.usage().resident_bytes, 48);
     }
 
     #[test]

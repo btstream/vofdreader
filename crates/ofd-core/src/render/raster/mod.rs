@@ -15,13 +15,14 @@ use resvg::usvg::fontdb;
 mod build;
 mod fonts;
 mod images;
-mod ops;
+pub(super) mod ops;
 mod paint;
 mod path;
 
 pub(crate) use build::prepare;
 pub(crate) use fonts::*;
 pub(crate) use images::*;
+pub(super) use ops::Op;
 pub(crate) use ops::Prepared;
 
 /// Glyph outlines and font choices shared by all pages of one renderer.
@@ -37,4 +38,4 @@ pub(crate) struct FontCache {
     embedded: HashMap<(usize, u64), Arc<resvg::tiny_skia::Path>>,
 }
 
-const IMAGE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub(super) const IMAGE_CACHE_BYTES: usize = 256 * 1024 * 1024;

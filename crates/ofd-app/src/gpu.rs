@@ -81,6 +81,10 @@ impl Resources {
         }
     }
 
+    pub(crate) fn contains_image(&self, id: u64) -> bool {
+        self.images.keys().any(|image| image.0 as u64 == id)
+    }
+
     pub fn painted(&mut self, image: &RenderImage) {
         self.stats.page_draws += 1;
         if let std::collections::hash_map::Entry::Vacant(entry) = self.resident.entry(image.id) {

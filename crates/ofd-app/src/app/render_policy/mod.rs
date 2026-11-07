@@ -27,16 +27,20 @@ impl PageRequest {
 
 /// Bytes a whole-page bitmap needs at `dpi` after `rotation`. Rounded up by
 /// one pixel per side, matching how the rasterizer sizes its output, so the
-/// reservation is never smaller than the real allocation.
+/// reservation covers output pixels and the known rotation copy, not internal
+/// rasterizer layers, decoded source images or allocator overhead.
 pub(crate) fn page_raster_estimate(size: SizeMm, dpi: u32, rotation: u8) -> usize {
     let (width, height) = if rotation % 2 == 1 {
         (size.height, size.width)
     } else {
         (size.width, size.height)
     };
-    let side = |mm: f64| (mm * f64::from(dpi) / 25.4).ceil() as u64 + 1;
+    let side = |mm: f64| ((mm * f64::from(dpi) / 25.4).ceil() as u64).saturating_add(1);
     let pixels = side(width).saturating_mul(side(height));
-    pixels.saturating_mul(4).min(usize::MAX as u64) as usize
+    pixels
+        .saturating_mul(4)
+        .saturating_mul(if rotation.is_multiple_of(4) { 1 } else { 2 })
+        .min(usize::MAX as u64) as usize
 }
 
 /// Largest density at or below `target` that `fits` accepts, stepping down in
@@ -59,6 +63,25 @@ pub(crate) fn affordable_dpi(
         }
         dpi = dpi.saturating_sub(24).max(floor);
     }
+}
+
+/// Retain every sidebar slot, but scale pixels to an explicit total allowance.
+/// Reject extreme pages that cannot fit even at 1 DPI. Pixel rounding matches
+/// page reservations and final byte admission is checked again on completion.
+pub(crate) fn thumbnail_dpi(size: SizeMm, count: usize, total_bytes: usize) -> Option<u32> {
+    if count == 0
+        || !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 0.0
+        || size.height <= 0.0
+    {
+        return None;
+    }
+    let per_page = total_bytes / count;
+    (1..=48).rev().find(|&dpi| {
+        page_raster_estimate(size, dpi, 0) <= per_page
+            && size.width.max(size.height) * f64::from(dpi) / 25.4 <= 512.0
+    })
 }
 
 /// One neighbour prefetch candidate: the page, its density and the resident
@@ -111,6 +134,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_intro_thumbnails_fit_the_low_budget() {
+        let size = SizeMm::new(320.0, 240.0);
+        let budget = 8 * 1024 * 1024;
+        let dpi = thumbnail_dpi(size, 42, budget).unwrap();
+        assert!(dpi < 48);
+        assert!(page_raster_estimate(size, dpi, 0) * 42 <= budget);
+        assert!(thumbnail_dpi(size, 42, 64 * 1024 * 1024).unwrap() > dpi);
+        assert_eq!(thumbnail_dpi(SizeMm::new(f64::MAX, 1.0), 42, budget), None);
+        assert_eq!(thumbnail_dpi(size, 0, budget), None);
+    }
+
+    #[test]
     fn pipeline_decisions_are_pure() {
         let request = PageRequest {
             seq: 1,
@@ -135,15 +170,36 @@ mod tests {
     }
 
     #[test]
-    fn a_lowered_target_does_not_ask_again_for_the_refused_density() {
-        // The view asks for 384, the budget allows 144. `min` keeps the view
-        // from repeatedly requesting 384 and re-rendering every frame.
-        let wanted = 384;
-        let allowed = 144;
-        assert_eq!(wanted.min(allowed), 144);
-        // Once the budget recovers, the view may raise its request again.
-        let allowed = 384;
-        assert_eq!(wanted.min(allowed), 384);
+    fn density_recomputes_for_page_zoom_and_capacity_changes() {
+        let resolve = |size, wanted, capacity| {
+            affordable_dpi(wanted, 48, |dpi| {
+                page_raster_estimate(size, dpi, 0) <= capacity
+            })
+        };
+        let large = SizeMm::new(420.0, 594.0);
+        let small = SizeMm::new(105.0, 148.5);
+        let capacity = page_raster_estimate(large, 144, 0);
+        assert_eq!(resolve(large, 384, capacity), Some(144));
+        assert_eq!(resolve(small, 384, capacity), Some(384));
+        assert_eq!(resolve(small, 96, capacity), Some(96));
+        assert_eq!(resolve(small, 192, capacity), Some(192));
+        assert_eq!(
+            resolve(large, 384, page_raster_estimate(large, 384, 0)),
+            Some(384)
+        );
+    }
+
+    #[test]
+    fn rotation_reserves_both_pixel_buffers_and_extreme_sizes_saturate() {
+        let size = SizeMm::new(210.0, 297.0);
+        assert_eq!(
+            page_raster_estimate(size, 96, 1),
+            page_raster_estimate(size, 96, 0) * 2
+        );
+        assert_eq!(
+            page_raster_estimate(SizeMm::new(f64::MAX, f64::MAX), u32::MAX, 1),
+            usize::MAX
+        );
     }
 
     #[test]

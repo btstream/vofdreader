@@ -79,7 +79,7 @@ impl ReaderApp {
                                     .text_size(px(12.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(p.text))
-                                    .child("渲染缓存上限"),
+                                    .child("渲染位图预算"),
                             )
                             .child(
                                 div()
@@ -93,7 +93,7 @@ impl ReaderApp {
                         div()
                             .text_size(px(10.0))
                             .text_color(rgb(p.text_tertiary))
-                            .child("整页位图与高清分块共享的保留预算；不足时自动降低预览清晰度"),
+                            .child("整页与分块的保留预算；其他资源缓存随之缩放，不是进程内存上限"),
                     )
                     .child(
                         div()
@@ -214,7 +214,7 @@ impl ReaderApp {
             ))
             .child(self.setting_row(
                 "解析页缓存",
-                "保留已解析页面树的页数",
+                &format!("设置页数上限；当前预算最多保留 {} 页，并受资源字节额度约束", self.cache_config.parsed_page_limit()),
                 self.stepper(
                     "performance-parsed-limit",
                     format!("{} 页", performance.parsed_page_limit),
