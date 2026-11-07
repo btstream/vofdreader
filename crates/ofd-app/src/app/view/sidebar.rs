@@ -5,13 +5,19 @@ impl ReaderApp {
         let p = self.palette();
         let selected = index == self.page;
         let size = self
+            .active
             .page_sizes
             .get(index)
             .copied()
             .unwrap_or(SizeMm::new(210.0, 297.0));
         let ratio = (size.width / size.height.max(0.01)) as f32;
 
-        let preview = if let Some(image) = self.thumbs.get(index).and_then(|image| image.as_ref()) {
+        let preview = if let Some(image) = self
+            .active
+            .thumbs
+            .get(index)
+            .and_then(|image| image.as_ref())
+        {
             img(image.clone())
                 .size_full()
                 .shadow_sm()
@@ -74,8 +80,8 @@ impl ReaderApp {
 
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette();
-        let visible = self.page_count.min(THUMB_LIMIT);
-        let searching = self.search_open;
+        let visible = self.active.page_count().min(THUMB_LIMIT);
+        let searching = self.search.open;
         let tab = |label: &'static str, active: bool| {
             div()
                 .h_full()
@@ -160,13 +166,13 @@ impl ReaderApp {
     /// open, keeping the document visible next to a narrow result list.
     pub(crate) fn sidebar_search_results(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
-        let query = self.search_query.trim();
+        let query = self.search.query.trim();
         let query_empty = query.is_empty();
-        let count = self.search_hits.len();
+        let count = self.search.hits.len();
         let position = if count == 0 {
             String::new()
         } else {
-            format!("{} / {}", self.search_index + 1, count)
+            format!("{} / {}", self.search.index + 1, count)
         };
         let summary = if query_empty {
             "等待输入".to_string()
@@ -205,12 +211,12 @@ impl ReaderApp {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .track_scroll(&self.search_results_scroll)
+                        .track_scroll(&self.search.results_scroll)
                         .pb_2()
                         .flex()
                         .flex_col()
-                        .children(self.search_hits.iter().enumerate().map(|(index, hit)| {
-                            let current = index == self.search_index;
+                        .children(self.search.hits.iter().enumerate().map(|(index, hit)| {
+                            let current = index == self.search.index;
                             let snippet = highlight_matches(&hit.snippet, query, p.search_match);
                             div()
                                 .id(("sidebar-search-hit", index))
@@ -279,7 +285,7 @@ impl ReaderApp {
                                 }),
                         ),
                 )
-                .vertical_scrollbar(&self.search_results_scroll)
+                .vertical_scrollbar(&self.search.results_scroll)
                 .into_any_element()
         };
 

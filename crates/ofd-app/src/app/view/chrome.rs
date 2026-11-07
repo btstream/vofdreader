@@ -49,22 +49,22 @@ impl ReaderApp {
                             .max_w(px(520.0))
                             .overflow_hidden()
                             .text_size(px(12.5))
-                            .text_color(if self.file_name.is_empty() {
+                            .text_color(if self.active.file_name.is_empty() {
                                 rgb(p.text_tertiary)
                             } else {
                                 rgb(p.text)
                             })
-                            .child(if self.file_name.is_empty() {
+                            .child(if self.active.file_name.is_empty() {
                                 "未打开文件".to_string()
                             } else {
-                                self.file_name.clone()
+                                self.active.file_name.clone()
                             }),
                     )
-                    .child(if self.page_count > 0 {
+                    .child(if self.active.page_count() > 0 {
                         div()
                             .text_size(px(12.0))
                             .text_color(rgb(p.text_tertiary))
-                            .child(format!("· {} 页", self.page_count))
+                            .child(format!("· {} 页", self.active.page_count()))
                     } else {
                         div()
                     }),
@@ -371,7 +371,7 @@ impl ReaderApp {
             )
             .child({
                 let info_entity = cx.entity().downgrade();
-                let has_doc = self.doc.is_some();
+                let has_doc = self.active.is_open();
                 Button::new("more")
                     .ghost()
                     .small()
@@ -404,12 +404,14 @@ impl ReaderApp {
         let p = self.palette();
         let actual = self.zoom_percent(viewport);
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .map(|size| format!("{:.1} × {:.1} mm", size.width, size.height))
             .unwrap_or_else(|| "—".to_string());
 
         let signed = self
+            .active
             .doc
             .as_ref()
             .map(|doc| doc.has_signature_material())
@@ -430,10 +432,14 @@ impl ReaderApp {
             .border_color(rgb(p.border))
             .text_size(px(11.0))
             .text_color(rgb(p.text_secondary))
-            .child(if self.page_count == 0 {
+            .child(if self.active.page_count() == 0 {
                 "未打开文档".to_string()
             } else {
-                format!("第 {} 页，共 {} 页", self.page + 1, self.page_count)
+                format!(
+                    "第 {} 页，共 {} 页",
+                    self.page + 1,
+                    self.active.page_count()
+                )
             })
             .child(size)
             .child(
@@ -442,7 +448,8 @@ impl ReaderApp {
                     .items_center()
                     .gap_2()
                     .children(
-                        self.font_reports
+                        self.active
+                            .font_reports
                             .get(&self.page)
                             .filter(|report| report.fallback_chars > 0)
                             .map(|report| {

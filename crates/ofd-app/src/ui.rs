@@ -1,19 +1,5 @@
 use crate::*;
 
-/// Movement of at least 3 logical pixels counts as pointer activity. GPUI can
-/// deliver per-frame moves with sub-pixel jitter while the pointer is still.
-/// A completed frame may only replace the displayed page when it belongs to
-/// the latest request, targets the visible page, and is not a downgrade.
-pub(crate) fn frame_is_current(
-    latest: bool,
-    page_matches: bool,
-    dpi: u32,
-    image_dpi: u32,
-    image_present: bool,
-) -> bool {
-    latest && page_matches && (!image_present || dpi >= image_dpi)
-}
-
 /// Bottom-center reveal zone, relative to the actual reading canvas rather
 /// than the window (sidebar/status bar must not activate the floating bar).
 pub(crate) fn near_floating_bar(bounds: Bounds<Pixels>, pointer: Point<Pixels>) -> bool {

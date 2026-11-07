@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use crate::content::parse_page_content;
 use crate::error::{OfdError, Result};
@@ -11,8 +11,16 @@ use crate::model::{
     TemplateRef, parse_physical_box,
 };
 use crate::package::Package;
-use crate::render::Item;
 use crate::xml::{child, child_text, children, parse_xml, required_attr};
+
+mod signature;
+
+use signature::load_signature_seals;
+pub(crate) use signature::{RenderedSeal, SealAppearance, SealStamp};
+#[cfg(test)]
+pub(crate) use signature::{
+    decode_seal_appearance, der_field, extract_embedded_image, seal_picture,
+};
 
 /// An opened OFD document.
 ///
@@ -30,18 +38,6 @@ pub struct OfdDocument {
     signature_seals: OnceLock<Vec<SealStamp>>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SealStamp {
-    pub page_id: String,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-    pub clip: Option<(f64, f64, f64, f64)>,
-    pub mime: &'static str,
-    pub data: Arc<Vec<u8>>,
-}
-
 impl OfdDocument {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let package = Package::open(path)?;
@@ -49,7 +45,7 @@ impl OfdDocument {
     }
 
     // Nested seal appearances must not recursively load signature appearances.
-    fn from_seal_bytes(data: Vec<u8>) -> Result<Self> {
+    pub(crate) fn from_seal_bytes(data: Vec<u8>) -> Result<Self> {
         Self::from_package(Package::from_bytes(data)?, false)
     }
 
@@ -289,31 +285,6 @@ impl OfdDocument {
 
     pub fn page_text(&self, index: usize) -> Result<Vec<String>> {
         Ok(self.page_summary(index)?.text)
-    }
-
-    /// Text of the rendered page, including background templates. Search uses
-    /// this so invoice titles and table labels declared in the template are
-    /// findable, not just the page's own content stream.
-    pub fn page_display_text(&self, index: usize) -> Result<Vec<String>> {
-        fn collect(items: &[Item], out: &mut Vec<String>) {
-            for item in items {
-                match item {
-                    Item::Text { chars, .. } => {
-                        let text: String = chars.iter().map(|char| char.ch).collect();
-                        if !text.trim().is_empty() {
-                            out.push(text);
-                        }
-                    }
-                    Item::Group { items, .. } | Item::Clip { items, .. } => collect(items, out),
-                    _ => {}
-                }
-            }
-        }
-
-        let list = self.display_list(index)?;
-        let mut out = Vec::new();
-        collect(&list.items, &mut out);
-        Ok(out)
     }
 
     pub fn annotations_for_page(&self, page_id: &str) -> Option<&AnnotationPage> {
@@ -675,220 +646,6 @@ fn walk_appearance(
             _ => {}
         }
     }
-}
-
-fn load_signature_seals(doc: &OfdDocument) -> Vec<SealStamp> {
-    let Some(signatures_loc) = &doc.ofd.signatures else {
-        return Vec::new();
-    };
-    let Ok(signatures_file) = resolve_loc(&doc.entry, signatures_loc) else {
-        return Vec::new();
-    };
-    let Ok(bytes) = doc.package.read_shared(&signatures_file) else {
-        return Vec::new();
-    };
-    let Ok(document) = parse_xml(&bytes, &signatures_file) else {
-        return Vec::new();
-    };
-
-    let mut stamps = Vec::new();
-    for signature in children(document.root_element(), "Signature") {
-        let Some(base_loc) = signature.attribute("BaseLoc") else {
-            continue;
-        };
-        let Ok(signature_file) = resolve_loc(&signatures_file, base_loc) else {
-            continue;
-        };
-        let Ok(signature_bytes) = doc.package.read_shared(&signature_file) else {
-            continue;
-        };
-        let Ok(signature_doc) = parse_xml(&signature_bytes, &signature_file) else {
-            continue;
-        };
-        let root = signature_doc.root_element();
-        let seal_loc = root
-            .descendants()
-            .find(|node| node.is_element() && node.tag_name().name() == "Seal")
-            .and_then(|seal| child_text(seal, "BaseLoc"));
-        // Some producers only carry the SES seal inside SignedValue.
-        let image = [seal_loc, child_text(root, "SignedValue")]
-            .into_iter()
-            .flatten()
-            .find_map(|loc| {
-                let file = resolve_loc(&signature_file, loc).ok()?;
-                let bytes = doc.package.read(&file).ok()?;
-                decode_seal_appearance(&bytes)
-            });
-        let Some((image, mime)) = image else {
-            continue;
-        };
-        let image = Arc::new(image);
-
-        for annot in root
-            .descendants()
-            .filter(|node| node.is_element() && node.tag_name().name() == "StampAnnot")
-        {
-            let Some(page_id) = annot.attribute("PageRef") else {
-                continue;
-            };
-            let Some((x, y, width, height)) = annot
-                .attribute("Boundary")
-                .and_then(crate::model::parse_box)
-            else {
-                continue;
-            };
-            let clip = annot.attribute("Clip").and_then(crate::model::parse_box);
-            stamps.push(SealStamp {
-                page_id: page_id.to_string(),
-                x,
-                y,
-                width,
-                height,
-                clip,
-                mime,
-                data: image.clone(),
-            });
-        }
-    }
-    stamps
-}
-
-fn decode_seal_appearance(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    if let Some((kind, picture)) = seal_picture(data, 0) {
-        if kind.eq_ignore_ascii_case(b"ofd") {
-            // No temporary extraction, external paths, or nested signature
-            // recursion. Package applies the usual ZIP entry/size limits.
-            if picture.len() > 16 * 1024 * 1024 {
-                return None;
-            }
-            let doc = OfdDocument::from_seal_bytes(picture.to_vec()).ok()?;
-            let svg = crate::render::PageRenderer::new(&doc)
-                .render_seal_svg(&doc)
-                .ok()?;
-            return Some((svg.into_bytes(), "image/svg+xml"));
-        }
-        if let Some(image) = extract_embedded_image(picture) {
-            return Some(image);
-        }
-    }
-    extract_embedded_image(data)
-}
-
-/// Read one definite-length DER field, rejecting truncation and arithmetic
-/// overflow. This only decodes appearance metadata; it does not verify a seal.
-fn der_field(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
-    let (&tag, rest) = data.split_first()?;
-    let (&length, rest) = rest.split_first()?;
-    let (length, body) = if length & 0x80 == 0 {
-        (length as usize, rest)
-    } else {
-        let count = (length & 0x7f) as usize;
-        if count == 0 || count > std::mem::size_of::<usize>() || count > rest.len() {
-            return None;
-        }
-        let mut length = 0usize;
-        for byte in &rest[..count] {
-            length = length.checked_mul(256)?.checked_add(*byte as usize)?;
-        }
-        (length, &rest[count..])
-    };
-    if length > body.len() {
-        return None;
-    }
-    Some((tag, &body[..length], &body[length..]))
-}
-
-/// SES picture info is a SEQUENCE { type IA5String, data OCTET STRING,
-/// width INTEGER, height INTEGER }. Locate the typed field, not a coincidental
-/// ZIP magic inside a certificate or some unrelated signed payload.
-fn seal_picture(mut data: &[u8], depth: usize) -> Option<(&[u8], &[u8])> {
-    if depth > 16 {
-        return None;
-    }
-    while !data.is_empty() {
-        let (tag, value, rest) = der_field(data)?;
-        if tag == 0x30 {
-            if let Some((0x16, kind, fields)) = der_field(value)
-                && [
-                    b"ofd".as_slice(),
-                    b"png".as_slice(),
-                    b"jpg".as_slice(),
-                    b"jpeg".as_slice(),
-                ]
-                .iter()
-                .any(|supported| kind.eq_ignore_ascii_case(supported))
-                && let Some((0x04, picture, _)) = der_field(fields)
-            {
-                return Some((kind, picture));
-            }
-            if let Some(picture) = seal_picture(value, depth + 1) {
-                return Some(picture);
-            }
-        }
-        data = rest;
-    }
-    None
-}
-
-/// Seal containers are ASN.1 envelopes with a complete PNG or JPEG embedded.
-/// Extract the first complete image without depending on a specific vendor's
-/// ASN.1 layout.
-fn extract_embedded_image(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    if let Some(start) = find_bytes(data, b"\x89PNG\r\n\x1a\n") {
-        let mut position = start + 8;
-        while position + 12 <= data.len() {
-            let length = u32::from_be_bytes([
-                data[position],
-                data[position + 1],
-                data[position + 2],
-                data[position + 3],
-            ]) as usize;
-            let kind = &data[position + 4..position + 8];
-            position += 12 + length;
-            if position > data.len() {
-                break;
-            }
-            if kind == b"IEND" {
-                return Some((data[start..position].to_vec(), "image/png"));
-            }
-        }
-    }
-    if let Some(start) = find_bytes(data, b"\xff\xd8\xff") {
-        let mut position = start + 2;
-        while position + 1 < data.len() {
-            if data[position] == 0xff {
-                let marker = data[position + 1];
-                if marker == 0xd9 {
-                    return Some((data[start..position + 2].to_vec(), "image/jpeg"));
-                }
-                if marker == 0xda {
-                    // Skip entropy-coded data until the next marker.
-                    position += 2;
-                    while position + 1 < data.len() {
-                        if data[position] == 0xff && data[position + 1] != 0x00 {
-                            break;
-                        }
-                        position += 1;
-                    }
-                    continue;
-                }
-                if position + 4 <= data.len() {
-                    let length =
-                        u16::from_be_bytes([data[position + 2], data[position + 3]]) as usize;
-                    position += 2 + length;
-                    continue;
-                }
-            }
-            position += 1;
-        }
-    }
-    None
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]

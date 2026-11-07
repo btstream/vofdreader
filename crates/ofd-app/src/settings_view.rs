@@ -715,12 +715,12 @@ impl ReaderApp {
     /// Drop in-memory thumbnails and regenerate them. Their atlas entries are
     /// released by the next frame's GPU reconcile.
     fn clear_thumbnail_cache(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        for thumb in &mut self.thumbs {
+        for thumb in &mut self.active.thumbs {
             *thumb = None;
         }
-        self.thumbs_started = false;
-        if self.doc.is_some() && self.renderer.is_some() {
-            self.thumbs_started = true;
+        self.active.thumbs_started = false;
+        if self.active.is_open() && self.active.renderer.is_some() {
+            self.active.thumbs_started = true;
             self.spawn_thumbnails(cx);
         }
         cx.notify();

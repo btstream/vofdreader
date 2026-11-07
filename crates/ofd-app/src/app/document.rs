@@ -1,53 +1,42 @@
 use crate::*;
 
 impl ReaderApp {
-    /// Releases every rendering resource owned by the active tab, then clears
-    /// the document state. Inactive tabs keep only their `DocumentTab` snapshot.
-    pub(crate) fn clear_active_document(&mut self, cx: &mut Context<Self>) {
-        self.doc_generation = self.doc_generation.wrapping_add(1);
-        let gpu = self.gpu.clone();
-        gpu.borrow_mut()
-            .release_all(|image| cx.drop_image(image, None));
-        self.doc = None;
-        self.renderer = None;
+    /// Drops every per-document raster product and invalidates in-flight jobs.
+    ///
+    /// This does not touch `ActiveDocument` metadata or the GPU registry: the
+    /// caller owns those because dropping atlas entries needs a `Window`.
+    pub(crate) fn reset_raster_state(&mut self) {
+        self.view_generation = self.view_generation.wrapping_add(1);
+        self.render_seq = self.render_seq.wrapping_add(1);
+        self.latest_render = None;
         self.page_image = None;
         self.image_dpi = 0;
         self.page_cache.clear();
         self.page_cache_order.clear();
         self.page_cache_bytes = 0;
         self.clear_tiles();
-        self.tile_order.clear();
-        self.tile_bytes = 0;
-        self.font_reports.clear();
         self.continuous_pending.clear();
         self.continuous_failed.clear();
         self.continuous_last_scroll = None;
         self.continuous_settle_pending = false;
         self.continuous_scroll.set_offset(point(px(0.0), px(0.0)));
         self.continuous_layout = RefCell::new(continuous::LayoutCache::default());
-        self.page_sizes_revision = self.page_sizes_revision.wrapping_add(1);
-        self.render_seq = self.render_seq.wrapping_add(1);
-        self.latest_render = None;
-        self.thumbs.clear();
-        self.thumbs_started = false;
-        self.page_text_cache = None;
-        self.text_layout = None;
+    }
+
+    /// Releases every rendering resource owned by the active tab, then clears
+    /// the document state. Inactive tabs keep only their `DocumentTab` snapshot.
+    pub(crate) fn clear_active_document(&mut self, cx: &mut Context<Self>) {
+        let gpu = self.gpu.clone();
+        gpu.borrow_mut()
+            .release_all(|image| cx.drop_image(image, None));
+        self.reset_raster_state();
+        self.active.close();
+        self.selection.layout = None;
         self.page_bounds.set(None);
         self.clear_selection();
-        self.search_highlights.clear();
-        self.search_active_highlight = None;
-        self.search_hits.clear();
-        self.search_index = 0;
-        self.search_open = false;
-        self.search_query.clear();
-        self.search_pending_index = None;
-        self.search_pending_input = None;
+        self.search.close();
         self.pending_restore_page = None;
         self.pending_restore_scroll = None;
-        self.page_count = 0;
-        self.page_sizes.clear();
-        self.loading = false;
-        self.error = None;
         self.notice = None;
         self.exporting = false;
         self.grid_open = false;
@@ -81,20 +70,19 @@ impl ReaderApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        self.tabs.push(DocumentTab {
-            path,
-            file_name,
+        let reading = ReadingSnapshot {
             page,
-            zoom: 1.0,
-            rotation: 0,
             view_mode: match self.settings.reading.default_view {
                 settings::ViewChoice::Single => ViewMode::Single,
                 settings::ViewChoice::Continuous => ViewMode::Continuous,
             },
-            search_open: false,
-            search_query: String::new(),
-            search_index: 0,
-            page_offset: 0.0,
+            ..ReadingSnapshot::default()
+        };
+        self.tabs.push(DocumentTab {
+            path,
+            file_name,
+            reading,
+            search: SearchSnapshot::default(),
         });
         let index = self.tabs.len() - 1;
         self.load_tab(index, window, cx);
@@ -113,16 +101,9 @@ impl ReaderApp {
         };
         self.clear_active_document(cx);
         self.active_tab = Some(index);
-        self.file_path = Some(tab.path.clone());
-        self.file_name = tab.file_name;
-        self.zoom = tab.zoom.max(0.1);
-        self.rotation = tab.rotation % 4;
-        self.view_mode = tab.view_mode;
-        self.search_open = tab.search_open;
-        self.search_query = tab.search_query.clone();
-        self.search_index = tab.search_index;
-        self.pending_restore_scroll = (tab.page_offset > 0.0).then_some(tab.page_offset);
-        self.load_document(tab.path, tab.page, window, cx);
+        self.apply_reading(&tab.reading);
+        self.search.apply_snapshot(&tab.search);
+        self.load_document(tab.path, tab.reading.page, window, cx);
     }
 
     pub(crate) fn load_document(
@@ -132,64 +113,45 @@ impl ReaderApp {
         mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        let file_size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        // Keep the attempted path visible in the title bar even when opening
+        // fails; `adopt` replaces it with the canonical identity on success.
+        self.active.path = Some(path.clone());
+        self.active.file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         match OfdDocument::open(&path) {
             Ok(doc) => {
                 let doc = Arc::new(doc);
-                self.file_path = Some(path.clone());
-                self.file_size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                self.active.adopt(doc.clone(), path.clone(), file_size);
                 let recent_limit = self.settings.files.recent_limit;
                 recent::push_recent(&mut self.recent, &path, recent_limit);
                 recent::save_recent(&self.recent, recent_limit);
-                self.page_count = doc.page_count();
-                self.page = target_page.min(self.page_count.saturating_sub(1));
-                self.pending_restore_page = (self.page_count > 0
+                self.page = target_page.min(self.active.page_count().saturating_sub(1));
+                self.pending_restore_page = (self.active.page_count() > 0
                     && (self.page > 0 || self.pending_restore_scroll.is_some()))
                 .then_some(self.page);
-                let fallback = doc.meta.page_area.unwrap_or(SizeMm::new(210.0, 297.0));
                 // Do not scan every page on the UI thread. The visible page is
                 // resolved synchronously; the rest are filled in the background.
-                self.page_sizes = vec![fallback; self.page_count];
-                self.page_sizes_revision = self.page_sizes_revision.wrapping_add(1);
                 if let Ok(Some(size)) = doc.page_size_only(self.page)
-                    && self.page < self.page_sizes.len()
+                    && self.page < self.active.page_sizes.len()
                 {
-                    self.page_sizes[self.page] = size;
+                    self.active.page_sizes[self.page] = size;
                 }
-                self.renderer = None;
-                self.doc = Some(doc.clone());
-                self.doc_generation = self.doc_generation.wrapping_add(1);
-                self.page_image = None;
-                self.image_dpi = 0;
-                self.page_cache.clear();
-                self.clear_tiles();
-                self.font_reports.clear();
-                self.continuous_pending.clear();
-                self.continuous_failed.clear();
-                self.continuous_last_scroll = None;
-                self.continuous_settle_pending = false;
-                self.continuous_scroll.set_offset(point(px(0.0), px(0.0)));
-                self.page_cache_order.clear();
-                self.page_cache_bytes = 0;
-                self.render_seq = self.render_seq.wrapping_add(1);
-                self.latest_render = None;
-                self.thumbs = vec![None; self.page_count];
-                self.thumbs_started = false;
-                self.page_text_cache = None;
-                self.search_highlights.clear();
-                self.search_active_highlight = None;
+                self.reset_raster_state();
+                self.search.clear_results();
                 self.clear_selection();
                 self.grid_open = false;
                 self.info_dialog_open = false;
-                self.error = None;
                 self.notice = None;
-                self.loading = true;
                 self.wheel_accum = 0.0;
                 self.settings.general.last_file = Some(path.to_string_lossy().into_owned());
                 self.settings.save();
                 self.restore_tab_search(window.as_deref_mut(), cx);
                 if let Some(window) = window {
-                    if self.search_open {
-                        if let Some(input) = &self.search_input {
+                    if self.search.open {
+                        if let Some(input) = &self.search.input {
                             input.update(cx, |state, cx| state.focus(window, cx));
                         }
                     } else {
@@ -199,7 +161,7 @@ impl ReaderApp {
 
                 // Font database construction is expensive; keep the UI thread
                 // free so the window chrome and empty state paint immediately.
-                let generation = self.doc_generation;
+                let generation = self.active.generation;
                 let renderer_doc = doc.clone();
                 let parsed_page_limit = self.cache_config.parsed_page_limit();
                 let image_filter = self.settings.performance.image_sampling.filter();
@@ -211,10 +173,10 @@ impl ReaderApp {
                         })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.doc_generation != generation {
+                        if this.active.generation != generation {
                             return;
                         }
-                        this.renderer = Some(Arc::new(renderer));
+                        this.active.renderer = Some(Arc::new(renderer));
                         this.request_page_render(cx);
                         cx.notify();
                     });
@@ -222,7 +184,7 @@ impl ReaderApp {
                 .detach();
 
                 let sizes_doc = doc.clone();
-                let generation = self.doc_generation;
+                let generation = self.active.generation;
                 cx.spawn(async move |this, cx| {
                     let sizes = cx
                         .background_spawn(async move {
@@ -232,21 +194,22 @@ impl ReaderApp {
                         })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.doc_generation != generation {
+                        if this.active.generation != generation {
                             return;
                         }
                         let mut changed = false;
                         for (index, size) in sizes.into_iter().enumerate() {
                             if let Some(size) = size
-                                && index < this.page_sizes.len()
-                                && this.page_sizes[index] != size
+                                && index < this.active.page_sizes.len()
+                                && this.active.page_sizes[index] != size
                             {
-                                this.page_sizes[index] = size;
+                                this.active.page_sizes[index] = size;
                                 changed = true;
                             }
                         }
                         if changed {
-                            this.page_sizes_revision = this.page_sizes_revision.wrapping_add(1);
+                            this.active.page_sizes_revision =
+                                this.active.page_sizes_revision.wrapping_add(1);
                             if this.view_mode == ViewMode::Continuous {
                                 this.ensure_continuous_pages(this.viewport, cx);
                             }
@@ -267,40 +230,17 @@ impl ReaderApp {
                 self.bar_hovered = false;
             }
             Err(error) => {
-                self.bar_visible = false;
-                self.bar_hovered = false;
-                self.continuous_last_scroll = None;
-                self.continuous_settle_pending = false;
-                self.error = Some(format!(
+                self.reset_raster_state();
+                self.active.fail(format!(
                     "无法打开 {}：\n{error}",
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default()
                 ));
-                self.doc = None;
-                self.renderer = None;
-                self.page_image = None;
-                self.image_dpi = 0;
-                self.page_cache.clear();
-                self.clear_tiles();
-                self.font_reports.clear();
-                self.continuous_pending.clear();
-                self.continuous_failed.clear();
-                self.continuous_scroll.set_offset(point(px(0.0), px(0.0)));
-                self.page_cache_order.clear();
-                self.page_cache_bytes = 0;
-                self.render_seq = self.render_seq.wrapping_add(1);
-                self.latest_render = None;
-                self.thumbs.clear();
-                self.thumbs_started = false;
-                self.page_text_cache = None;
-                self.search_highlights.clear();
-                self.search_active_highlight = None;
+                self.search.clear_results();
                 self.clear_selection();
-                self.page_count = 0;
-                self.page_sizes.clear();
-                self.file_size = 0;
-                self.loading = false;
+                self.bar_visible = false;
+                self.bar_hovered = false;
             }
         }
     }

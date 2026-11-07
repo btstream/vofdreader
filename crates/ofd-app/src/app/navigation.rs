@@ -23,7 +23,7 @@ impl ReaderApp {
         };
         self.page_image = None;
         self.image_dpi = 0;
-        self.text_layout = None;
+        self.selection.layout = None;
         self.clear_selection();
         match self.view_mode {
             ViewMode::Continuous => {
@@ -36,13 +36,13 @@ impl ReaderApp {
     }
 
     pub(crate) fn go_to_page(&mut self, page: usize, cx: &mut Context<Self>) {
-        if page >= self.page_count || page == self.page {
+        if page >= self.active.page_count() || page == self.page {
             return;
         }
         self.page = page;
         self.page_image = None;
         self.image_dpi = 0;
-        self.text_layout = None;
+        self.selection.layout = None;
         self.clear_selection();
         self.refresh_search_highlights();
         match self.view_mode {
@@ -72,6 +72,7 @@ impl ReaderApp {
 
     pub(crate) fn fit_scale(&self, viewport: Size<Pixels>) -> f32 {
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .copied()
@@ -88,6 +89,7 @@ impl ReaderApp {
 
     pub(crate) fn display_size(&self, viewport: Size<Pixels>) -> (Pixels, Pixels) {
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .copied()
@@ -115,6 +117,7 @@ impl ReaderApp {
             return 1.0;
         }
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .copied()
@@ -143,6 +146,7 @@ impl ReaderApp {
         }
         let viewport = window.viewport_size();
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .copied()
@@ -167,7 +171,7 @@ impl ReaderApp {
         // Cached rasters and in-flight jobs belong to the previous orientation;
         // the old bitmap has the wrong shape, so nothing stays on screen.
         self.page_image = None;
-        if self.doc.is_some() && self.view_mode == ViewMode::Continuous {
+        if self.active.is_open() && self.view_mode == ViewMode::Continuous {
             self.scroll_to_continuous_page(self.viewport, self.page);
         }
         self.invalidate_rasters(cx);
@@ -177,7 +181,7 @@ impl ReaderApp {
     /// are dropped and re-rendered. A no-op when it did not change.
     pub(crate) fn apply_image_sampling(&mut self, cx: &mut Context<Self>) {
         let filter = self.settings.performance.image_sampling.filter();
-        let Some(renderer) = &self.renderer else {
+        let Some(renderer) = &self.active.renderer else {
             return;
         };
         if renderer.image_filter() == filter {
@@ -202,9 +206,10 @@ impl ReaderApp {
         self.clear_tiles();
         self.continuous_pending.clear();
         self.continuous_failed.clear();
-        self.loading =
-            self.view_mode == ViewMode::Single && self.doc.is_some() && self.page_image.is_none();
-        if self.doc.is_some() {
+        self.active.loading = self.view_mode == ViewMode::Single
+            && self.active.is_open()
+            && self.page_image.is_none();
+        if self.active.is_open() {
             if self.view_mode == ViewMode::Continuous {
                 self.ensure_continuous_pages(self.viewport, cx);
             } else if !self.grid_open {
@@ -225,7 +230,7 @@ impl ReaderApp {
 
     pub(crate) fn toggle_grid(&mut self, cx: &mut Context<Self>) {
         self.grid_open = !self.grid_open;
-        if !self.grid_open && self.doc.is_some() {
+        if !self.grid_open && self.active.is_open() {
             match self.view_mode {
                 ViewMode::Continuous => {
                     self.scroll_to_continuous_page(self.viewport, self.page);
@@ -235,8 +240,8 @@ impl ReaderApp {
                 ViewMode::Single => {}
             }
         }
-        if self.grid_open && !self.thumbs_started && self.renderer.is_some() {
-            self.thumbs_started = true;
+        if self.grid_open && !self.active.thumbs_started && self.active.renderer.is_some() {
+            self.active.thumbs_started = true;
             self.spawn_thumbnails(cx);
         }
         cx.notify();

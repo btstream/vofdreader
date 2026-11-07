@@ -3,11 +3,11 @@ use crate::*;
 impl ReaderApp {
     pub(crate) fn search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
-        let Some(input) = &self.search_input else {
+        let Some(input) = &self.search.input else {
             return div().into_any_element();
         };
-        let query_empty = self.search_query.trim().is_empty();
-        let count = self.search_hits.len();
+        let query_empty = self.search.query.trim().is_empty();
+        let count = self.search.hits.len();
 
         let bar = div()
             .h(px(42.0))

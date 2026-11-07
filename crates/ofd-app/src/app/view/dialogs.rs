@@ -2,33 +2,38 @@ use crate::*;
 
 impl ReaderApp {
     pub(crate) fn info_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
-        if !self.info_dialog_open || self.doc.is_none() {
+        if !self.info_dialog_open || !self.active.is_open() {
             return div().into_any_element();
         }
         let p = self.palette();
-        let doc = self.doc.as_ref().expect("checked above");
+        let doc = self.active.doc.as_ref().expect("checked above");
         let info = &doc.ofd.info;
         let signed = doc.has_signature_material();
         let size = self
+            .active
             .page_sizes
             .get(self.page)
             .map(|size| format!("{:.0} × {:.0} mm", size.width, size.height))
             .unwrap_or_else(|| "—".to_string());
         let path = self
-            .file_path
+            .active
+            .path
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "—".to_string());
         let rows = [
             ("标题", info.title.clone().unwrap_or_else(|| "—".into())),
-            ("文件", self.file_name.clone()),
+            ("文件", self.active.file_name.clone()),
             (
                 "格式",
                 format!("OFD {} / {}", doc.ofd.version, doc.ofd.doc_type),
             ),
             ("文档 ID", info.doc_id.clone().unwrap_or_else(|| "—".into())),
-            ("页面", format!("{} 页 · 当前 {}", self.page_count, size)),
-            ("大小", human_size(self.file_size)),
+            (
+                "页面",
+                format!("{} 页 · 当前 {}", self.active.page_count(), size),
+            ),
+            ("大小", human_size(self.active.file_size)),
             ("作者", info.author.clone().unwrap_or_else(|| "—".into())),
             ("创建者", info.creator.clone().unwrap_or_else(|| "—".into())),
             (

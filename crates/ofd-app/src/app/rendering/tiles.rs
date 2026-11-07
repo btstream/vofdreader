@@ -14,7 +14,7 @@ impl ReaderApp {
     /// Tiles carry the zoomed-in detail above the whole-page bitmap: they
     /// exist only when the wanted density exceeds the page's base density.
     pub(crate) fn tile_density(&self, page: usize) -> Option<u32> {
-        if page >= self.page_sizes.len() {
+        if page >= self.active.page_sizes.len() {
             return None;
         }
         let (scale, visible) = if self.view_mode == ViewMode::Continuous {
@@ -39,24 +39,28 @@ impl ReaderApp {
     pub(crate) fn nearby_page_range(&self) -> std::ops::Range<usize> {
         let actual = if self.view_mode == ViewMode::Continuous {
             self.continuous_content_range(self.viewport)
-        } else if self.page_count > 0 {
+        } else if self.active.page_count() > 0 {
             self.page..self.page + 1
         } else {
             0..0
         };
-        continuous::prefetch_range(actual, self.page_count, self.cache_config.prefetch_pages())
+        continuous::prefetch_range(
+            actual,
+            self.active.page_count(),
+            self.cache_config.prefetch_pages(),
+        )
     }
 
     pub(crate) fn schedule_nearby(&mut self, cx: &mut Context<Self>) {
         // Continuous scrolling keeps prefetching so pages are ready before
         // they appear; single-page wheel bursts still coalesce.
-        if self.doc.is_none()
-            || self.renderer.is_none()
+        if !self.active.is_open()
+            || self.active.renderer.is_none()
             || self.grid_open
             || (self.view_mode == ViewMode::Single && self.continuous_scrolling())
             || self.dpi_pending
             || self.latest_render.is_some()
-            || self.loading
+            || self.active.loading
         {
             return;
         }
@@ -101,7 +105,7 @@ impl ReaderApp {
                 if cached > 0 {
                     cached
                 } else {
-                    page_raster_bytes(self.page_sizes[page], dpi_of(self, page))
+                    page_raster_bytes(self.active.page_sizes[page], dpi_of(self, page))
                 }
             })
             .sum();
@@ -120,7 +124,7 @@ impl ReaderApp {
                     .min();
                 let bytes = match sharpest {
                     Some(found) => self.cached_page_bytes(|key| key == (page, found)),
-                    None => page_raster_bytes(self.page_sizes[page], dpi),
+                    None => page_raster_bytes(self.active.page_sizes[page], dpi),
                 };
                 (page, dpi, bytes)
             })
@@ -180,10 +184,11 @@ impl ReaderApp {
         }) else {
             return false;
         };
-        let (Some(doc), Some(renderer)) = (self.doc.clone(), self.renderer.clone()) else {
+        let (Some(doc), Some(renderer)) = (self.active.doc.clone(), self.active.renderer.clone())
+        else {
             return false;
         };
-        let size = self.page_sizes[key.page];
+        let size = self.active.page_sizes[key.page];
         let (width, height) = rotate::size(
             (size.width * key.dpi as f64 / 25.4).ceil() as f32,
             (size.height * key.dpi as f64 / 25.4).ceil() as f32,
@@ -207,7 +212,7 @@ impl ReaderApp {
         if protected_bytes + in_flight + bytes > self.cache_config.tile_bytes() {
             return false;
         }
-        let generation = self.doc_generation;
+        let generation = self.active.generation;
         let view_generation = self.view_generation;
         let rotation = self.rotation;
         self.tile_jobs.insert(key, bytes);
@@ -234,7 +239,7 @@ impl ReaderApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.tile_jobs.remove(&key);
-                if generation == this.doc_generation
+                if generation == this.active.generation
                     && view_generation == this.view_generation
                     && this.tile_requests(true).contains(&key)
                 {

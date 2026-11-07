@@ -1,4 +1,5 @@
 use super::{OfdDocument, decode_seal_appearance, der_field, extract_embedded_image, seal_picture};
+use crate::document::SealAppearance;
 use crate::{PageRenderer, RasterRegion};
 
 #[test]
@@ -12,8 +13,13 @@ fn signed_value_ofd_seal_is_visible_and_transparent() {
         (stamps[0].x, stamps[0].y, stamps[0].width, stamps[0].height),
         (90.0, 8.0, 30.0, 20.0)
     );
-    assert_eq!(stamps[0].mime, "image/svg+xml");
-    let svg = std::str::from_utf8(&stamps[0].data).unwrap();
+    match &stamps[0].appearance {
+        SealAppearance::Ofd(picture) => assert!(picture.starts_with(b"PK")),
+        other => panic!("expected a nested OFD seal, got {other:?}"),
+    }
+    let rendered = crate::render::seal_appearance(&stamps[0]).unwrap();
+    assert_eq!(rendered.mime, "image/svg+xml");
+    let svg = std::str::from_utf8(&rendered.data).unwrap();
     assert!(svg.contains("viewBox=\"0 0 30 20\""));
     assert!(
         !svg.contains("fill=\"#FFFFFF\""),
@@ -54,7 +60,12 @@ fn der_picture_fields_are_bounded_and_typed() {
     let (kind, data) = seal_picture(picture, 0).unwrap();
     assert_eq!(kind, b"ofd");
     assert_eq!(data, b"zip");
-    assert!(decode_seal_appearance(picture).is_none());
+    // Extraction no longer renders a nested OFD; a malformed package is
+    // rejected lazily when the seal appearance is built.
+    assert!(matches!(
+        decode_seal_appearance(picture),
+        Some(SealAppearance::Ofd(_))
+    ));
     for invalid in [
         b"\x30\x80".as_slice(),
         b"\x04\x88\xff\xff\xff\xff\xff\xff\xff\xff",

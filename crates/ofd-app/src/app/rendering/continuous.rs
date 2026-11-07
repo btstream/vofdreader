@@ -3,6 +3,7 @@ use crate::*;
 impl ReaderApp {
     pub(crate) fn continuous_page_scale(&self, viewport: Size<Pixels>, index: usize) -> f32 {
         let size = self
+            .active
             .page_sizes
             .get(index)
             .copied()
@@ -29,14 +30,14 @@ impl ReaderApp {
         let key = continuous::LayoutKey {
             width: (f32::from(viewport.width) - sidebar - 72.0).max(240.0),
             zoom: self.zoom,
-            revision: self.page_sizes_revision,
+            revision: self.active.page_sizes_revision,
             rotation: self.rotation,
             gap: self.settings.reading.page_gap.pixels(),
         };
         f(self
             .continuous_layout
             .borrow_mut()
-            .get(key, &self.page_sizes))
+            .get(key, &self.active.page_sizes))
     }
 
     pub(crate) fn continuous_top(&self, viewport: Size<Pixels>, index: usize) -> f32 {
@@ -68,7 +69,7 @@ impl ReaderApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(highlight) = self.search_highlights.get(index) else {
+        let Some(highlight) = self.search.highlights.get(index) else {
             return;
         };
         let (page_top, page_height, content_height) =
@@ -99,7 +100,7 @@ impl ReaderApp {
         &self,
         viewport: Size<Pixels>,
     ) -> std::ops::Range<usize> {
-        if self.page_count == 0 {
+        if self.active.page_count() == 0 {
             return 0..0;
         }
         let offset = -f32::from(self.continuous_scroll.offset().y);
@@ -111,13 +112,14 @@ impl ReaderApp {
         &self,
         viewport: Size<Pixels>,
     ) -> std::ops::Range<usize> {
-        if self.page_count == 0 {
+        if self.active.page_count() == 0 {
             return 0..0;
         }
         let offset = -f32::from(self.continuous_scroll.offset().y);
         let height = (f32::from(viewport.height) - 124.0).max(240.0);
         self.with_continuous_layout(viewport, |layout| {
-            layout.page_at(offset)..(layout.page_at(offset + height) + 1).min(self.page_count)
+            layout.page_at(offset)
+                ..(layout.page_at(offset + height) + 1).min(self.active.page_count())
         })
     }
 
@@ -127,7 +129,7 @@ impl ReaderApp {
     pub(crate) fn continuous_page_slots(&self, viewport: Size<Pixels>, page: usize) -> usize {
         let height = (f32::from(viewport.height) - 124.0).max(240.0);
         let page_height = self.continuous_page_size(viewport, page).1.max(1.0);
-        ((height / page_height).ceil() as usize + 1).clamp(1, self.page_count.max(1))
+        ((height / page_height).ceil() as usize + 1).clamp(1, self.active.page_count().max(1))
     }
 
     pub(crate) fn continuous_dpi(&self, viewport: Size<Pixels>, page: usize) -> u32 {
@@ -184,13 +186,13 @@ impl ReaderApp {
             return;
         }
         self.continuous_settle_pending = true;
-        let generation = self.doc_generation;
+        let generation = self.active.generation;
         cx.spawn(async move |this, cx| {
             let mut wait = CONTINUOUS_IDLE;
             loop {
                 cx.background_executor().timer(wait).await;
                 let next = this.update(cx, |this, cx| {
-                    if this.doc_generation != generation {
+                    if this.active.generation != generation {
                         return None;
                     }
                     if let Some(last) = this.continuous_last_scroll {
@@ -204,7 +206,7 @@ impl ReaderApp {
                         this.refresh_search_highlights();
                         this.ensure_continuous_pages(this.viewport, cx);
                         cx.notify();
-                    } else if this.doc.is_some() {
+                    } else if this.active.is_open() {
                         this.request_page_render(cx);
                         cx.notify();
                     }
@@ -237,13 +239,13 @@ impl ReaderApp {
         let page = self.continuous_page_at(viewport, scroll);
         if page != self.page {
             self.page = page;
-            self.text_layout = None;
+            self.selection.layout = None;
             self.clear_selection();
             if !self.continuous_scrolling() {
                 self.refresh_search_highlights();
             } else {
-                self.search_highlights.clear();
-                self.search_active_highlight = None;
+                self.search.highlights.clear();
+                self.search.active_highlight = None;
             }
             cx.notify();
         }
@@ -255,7 +257,7 @@ impl ReaderApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if (event.modifiers.control || event.modifiers.platform) && self.page_count > 0 {
+        if (event.modifiers.control || event.modifiers.platform) && self.active.page_count() > 0 {
             self.note_continuous_scroll(cx);
             self.set_zoom(self.zoom * wheel_zoom_factor(event.delta), cx);
             return;
@@ -275,7 +277,7 @@ impl ReaderApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.view_mode != ViewMode::Single || self.page_count == 0 || self.grid_open {
+        if self.view_mode != ViewMode::Single || self.active.page_count() == 0 || self.grid_open {
             return;
         }
         if event.modifiers.control || event.modifiers.platform {

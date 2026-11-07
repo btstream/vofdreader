@@ -2,7 +2,7 @@ use crate::*;
 
 impl ReaderApp {
     pub(crate) fn save_position(&mut self) {
-        if let Some(path) = &self.file_path {
+        if let Some(path) = &self.active.path {
             self.settings.general.last_file = Some(path.to_string_lossy().into_owned());
             self.settings.remember_position(path, self.page);
         }
@@ -16,28 +16,23 @@ impl ReaderApp {
         if index >= self.tabs.len() {
             return;
         }
-        let page_offset = self.current_page_offset();
+        let reading = self.reading_snapshot();
+        let search = self.search.snapshot();
         let tab = &mut self.tabs[index];
-        tab.search_open = self.search_open;
-        tab.search_query = self.search_query.clone();
-        tab.search_index = self.search_index;
-        if self.doc.is_none() {
+        tab.search = search;
+        if !self.active.is_open() {
             return;
         }
-        tab.page = self.page;
-        tab.zoom = self.zoom;
-        tab.rotation = self.rotation;
-        tab.view_mode = self.view_mode;
-        tab.page_offset = page_offset;
-        tab.file_name = self.file_name.clone();
-        if let Some(path) = &self.file_path {
+        tab.reading = reading;
+        tab.file_name = self.active.file_name.clone();
+        if let Some(path) = &self.active.path {
             tab.path = path.clone();
         }
     }
 
     /// Fraction of the current page that is scrolled above the viewport.
     pub(crate) fn current_page_offset(&self) -> f32 {
-        if self.view_mode != ViewMode::Continuous || self.page_count == 0 {
+        if self.view_mode != ViewMode::Continuous || self.active.page_count() == 0 {
             return 0.0;
         }
         let viewport = self.viewport;
@@ -63,7 +58,7 @@ impl ReaderApp {
         if index >= self.tabs.len() {
             return;
         }
-        if self.active_tab == Some(index) && self.doc.is_some() {
+        if self.active_tab == Some(index) && self.active.is_open() {
             return;
         }
         if self.active_tab != Some(index) {
@@ -82,9 +77,9 @@ impl ReaderApp {
             self.active_tab = None;
             if self.tabs.is_empty() {
                 self.clear_active_document(cx);
-                self.file_path = None;
-                self.file_name.clear();
-                self.file_size = 0;
+                self.active.path = None;
+                self.active.file_name.clear();
+                self.active.file_size = 0;
                 self.page = 0;
                 self.pending_restore_page = None;
                 self.pending_restore_scroll = None;

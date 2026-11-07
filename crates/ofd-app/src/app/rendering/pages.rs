@@ -1,3 +1,4 @@
+use crate::app::render_policy;
 use crate::*;
 
 impl ReaderApp {
@@ -28,6 +29,7 @@ impl ReaderApp {
     /// view is already at its final quality.
     pub(crate) fn base_dpi(&self, page: usize, visible: usize) -> u32 {
         let size = self
+            .active
             .page_sizes
             .get(page)
             .copied()
@@ -77,14 +79,14 @@ impl ReaderApp {
 
     pub(crate) fn request_page_render(&mut self, cx: &mut Context<Self>) {
         if self.view_mode == ViewMode::Continuous {
-            self.loading = false;
+            self.active.loading = false;
             self.ensure_continuous_pages(self.viewport, cx);
             return;
         }
-        let Some(doc) = self.doc.clone() else {
+        let Some(doc) = self.active.doc.clone() else {
             return;
         };
-        let Some(renderer) = self.renderer.clone() else {
+        let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
 
@@ -96,8 +98,8 @@ impl ReaderApp {
         if let Some((cached_dpi, image)) = self.cached_page_image(page, dpi) {
             self.page_image = Some(image);
             self.image_dpi = cached_dpi;
-            self.loading = false;
-            self.error = None;
+            self.active.loading = false;
+            self.active.error = None;
             self.latest_render = None;
             return;
         }
@@ -117,7 +119,7 @@ impl ReaderApp {
         {
             self.page_image = Some(image);
             self.image_dpi = cached_dpi;
-            self.loading = false;
+            self.active.loading = false;
         }
         if self.continuous_scrolling() || self.tile_busy() || !self.continuous_pending.is_empty() {
             return;
@@ -127,18 +129,20 @@ impl ReaderApp {
         // for the same density while a render is running).
         if self
             .latest_render
-            .is_some_and(|(_, pending_page, pending_dpi)| {
-                pending_page == page && pending_dpi == dpi
-            })
+            .is_some_and(|pending| pending.page == page && pending.dpi == dpi)
         {
             return;
         }
 
         self.render_seq = self.render_seq.wrapping_add(1);
-        let seq = self.render_seq;
-        self.latest_render = Some((seq, page, dpi));
-        self.loading = self.page_image.is_none();
-        let generation = self.doc_generation;
+        let request = render_policy::PageRequest {
+            seq: self.render_seq,
+            page,
+            dpi,
+        };
+        self.latest_render = Some(request);
+        self.active.loading = self.page_image.is_none();
+        let generation = self.active.generation;
         let view_generation = self.view_generation;
         let rotation = self.rotation;
 
@@ -169,37 +173,32 @@ impl ReaderApp {
             match result {
                 Ok((image, bytes, font_report)) => {
                     let _ = this.update(cx, |this, cx| {
-                        if this.doc_generation != generation
+                        if this.active.generation != generation
                             || this.view_generation != view_generation
                         {
                             return;
                         }
                         this.cache_page_image(page, dpi, image.clone(), bytes);
-                        this.font_reports.insert(page, font_report);
-                        let is_latest = this
-                            .latest_render
-                            .is_some_and(|(latest_seq, _, _)| latest_seq == seq);
-                        if !is_latest {
+                        this.active.font_reports.insert(page, font_report);
+                        if !request.is_latest(this.latest_render) {
                             return;
                         }
                         this.latest_render = None;
-                        this.loading = false;
-                        if frame_is_current(
-                            true,
-                            this.page == page,
-                            dpi,
+                        this.active.loading = false;
+                        if request.replaces_visible(
+                            this.page,
                             this.image_dpi,
                             this.page_image.is_some(),
                         ) {
                             this.page_image = Some(image);
                             this.image_dpi = dpi;
-                            this.error = None;
+                            this.active.error = None;
                         }
                         // Start thumbnails only after the main page is on
                         // screen, so they do not compete for CPU with the
                         // first paint.
-                        if !this.thumbs_started {
-                            this.thumbs_started = true;
+                        if !this.active.thumbs_started {
+                            this.active.thumbs_started = true;
                             this.spawn_thumbnails(cx);
                         }
                         cx.notify();
@@ -207,20 +206,18 @@ impl ReaderApp {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if this.doc_generation != generation
+                        if this.active.generation != generation
                             || this.view_generation != view_generation
                         {
                             return;
                         }
-                        let is_latest = this
-                            .latest_render
-                            .is_some_and(|(latest_seq, _, _)| latest_seq == seq);
+                        let is_latest = request.is_latest(this.latest_render);
                         if !is_latest {
                             return;
                         }
                         this.latest_render = None;
-                        this.loading = false;
-                        this.error = Some(format!("页面渲染失败：{error}"));
+                        this.active.loading = false;
+                        this.active.error = Some(format!("页面渲染失败：{error}"));
                         cx.notify();
                     });
                 }
@@ -322,8 +319,12 @@ impl ReaderApp {
             self.cache_config.page_limit()
         };
         while self.page_cache.len() > 1
-            && (self.page_cache.len() > count_limit
-                || self.page_cache_bytes > self.cache_config.page_bytes())
+            && render_policy::cache_over_budget(
+                self.page_cache.len(),
+                count_limit,
+                self.page_cache_bytes,
+                self.cache_config.page_bytes(),
+            )
         {
             let Some(oldest) = self.page_cache_order.pop_front() else {
                 break;
@@ -352,14 +353,14 @@ impl ReaderApp {
     /// saturate every background worker and made the main page wait behind
     /// dozens of thumbnail jobs on multi-page documents.
     pub(crate) fn spawn_thumbnails(&mut self, cx: &mut Context<Self>) {
-        let Some(doc) = self.doc.clone() else {
+        let Some(doc) = self.active.doc.clone() else {
             return;
         };
-        let Some(renderer) = self.renderer.clone() else {
+        let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
-        let generation = self.doc_generation;
-        let count = self.page_count.min(THUMB_LIMIT);
+        let generation = self.active.generation;
+        let count = self.active.page_count().min(THUMB_LIMIT);
         let mut order: Vec<usize> = (0..count).collect();
         order.sort_by_key(|page| page.abs_diff(self.page));
 
@@ -369,7 +370,7 @@ impl ReaderApp {
                 // foreground page. At most one thumbnail is already running.
                 loop {
                     let ready = this.update(cx, |this, _| {
-                        if this.doc_generation != generation {
+                        if this.active.generation != generation {
                             return None;
                         }
                         Some(
@@ -401,16 +402,16 @@ impl ReaderApp {
                     continue;
                 };
                 let alive = this.update(cx, |this, cx| {
-                    if this.doc_generation == generation && page < this.thumbs.len() {
+                    if this.active.generation == generation && page < this.active.thumbs.len() {
                         this.gpu.borrow_mut().register(image.clone());
-                        this.thumbs[page] = Some(image);
+                        this.active.thumbs[page] = Some(image);
                         let visible = this.thumbnail_on_screen(page);
                         this.gpu.borrow_mut().background_done(visible);
                         if visible {
                             cx.notify();
                         }
                     }
-                    this.doc_generation == generation
+                    this.active.generation == generation
                 });
                 if !matches!(alive, Ok(true)) {
                     break;
@@ -421,7 +422,7 @@ impl ReaderApp {
     }
 
     pub(crate) fn request_cached_page(&mut self, page: usize, dpi: u32, cx: &mut Context<Self>) {
-        if page >= self.page_count
+        if page >= self.active.page_count()
             || !continuous::render_ready(self.raster_jobs(), self.tile_slots)
             || self.latest_render.is_some()
         {
@@ -434,10 +435,10 @@ impl ReaderApp {
         {
             return;
         }
-        let Some(doc) = self.doc.clone() else {
+        let Some(doc) = self.active.doc.clone() else {
             return;
         };
-        let Some(renderer) = self.renderer.clone() else {
+        let Some(renderer) = self.active.renderer.clone() else {
             return;
         };
         if self.continuous_failed.contains(&(page, dpi))
@@ -445,7 +446,7 @@ impl ReaderApp {
         {
             return;
         }
-        let generation = self.doc_generation;
+        let generation = self.active.generation;
         let view_generation = self.view_generation;
         let rotation = self.rotation;
         cx.spawn(async move |this, cx| {
@@ -459,7 +460,7 @@ impl ReaderApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.doc_generation != generation {
+                if this.active.generation != generation {
                     return;
                 }
                 this.continuous_pending.remove(&(page, dpi));
@@ -483,8 +484,8 @@ impl ReaderApp {
                         Arc::new(RenderImage::new([image::Frame::new(buffer)])),
                         bytes,
                     );
-                    if !this.thumbs_started {
-                        this.thumbs_started = true;
+                    if !this.active.thumbs_started {
+                        this.active.thumbs_started = true;
                         this.spawn_thumbnails(cx);
                     }
                 }
@@ -547,7 +548,7 @@ impl ReaderApp {
         if let Some(image) = &self.page_image {
             live.insert(image.id);
         }
-        live.extend(self.thumbs.iter().flatten().map(|image| image.id));
+        live.extend(self.active.thumbs.iter().flatten().map(|image| image.id));
         self.gpu
             .borrow_mut()
             .reconcile(&live, |image| window.drop_image(image).is_ok());

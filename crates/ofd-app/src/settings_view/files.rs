@@ -10,7 +10,8 @@ impl ReaderApp {
             ExportFormat::Svg => 1,
         };
         let (thumb_count, thumb_bytes) =
-            self.thumbs
+            self.active
+                .thumbs
                 .iter()
                 .flatten()
                 .fold((0, 0u64), |(count, bytes), image| {

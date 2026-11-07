@@ -35,101 +35,10 @@ mod single_instance;
 mod tiles;
 mod ui;
 
-pub(crate) use app::theme::apply_component_theme;
+use app::reading::{ReadingSnapshot, ViewMode};
+use app::search_state::SearchSnapshot;
+pub(crate) use app::theme::{Palette, apply_component_theme};
 pub(crate) use ui::*;
-
-/// Colors for one appearance mode. Kept separate from the component theme so
-/// the reader keeps its own neutral palette while buttons and dialogs follow it.
-#[derive(Clone, Copy)]
-struct Palette {
-    bg: u32,
-    titlebar: u32,
-    toolbar: u32,
-    surface: u32,
-    canvas: u32,
-    sidebar: u32,
-    border: u32,
-    border_strong: u32,
-    text: u32,
-    text_secondary: u32,
-    text_tertiary: u32,
-    accent: u32,
-    accent_soft: u32,
-    primary_hover: u32,
-    primary_active: u32,
-    window_control_hover: u32,
-    window_control_active: u32,
-    window_close_hover: u32,
-    window_close_active: u32,
-    search_match: u32,
-    warning: u32,
-    error: u32,
-    error_border: u32,
-    error_soft: u32,
-    dot: u32,
-}
-
-impl Palette {
-    const LIGHT: Self = Self {
-        bg: 0xF7F8FA,
-        titlebar: 0xFBFBFC,
-        toolbar: 0xFFFFFF,
-        surface: 0xFFFFFF,
-        canvas: 0xE9EBEF,
-        sidebar: 0xF6F7F9,
-        border: 0xE5E7EB,
-        border_strong: 0xE3E6EB,
-        text: 0x1B1E25,
-        text_secondary: 0x5B6472,
-        text_tertiary: 0x98A1AF,
-        accent: 0x2F6FEB,
-        accent_soft: 0xEDF2FE,
-        primary_hover: 0x2560D4,
-        primary_active: 0x1F4FB5,
-        window_control_hover: 0xEDEFF2,
-        window_control_active: 0xE1E4E9,
-        window_close_hover: 0xE5484D,
-        window_close_active: 0xC93A3F,
-        search_match: 0xB45309,
-        warning: 0xB45309,
-        error: 0xB42318,
-        error_border: 0xFCA5A5,
-        error_soft: 0xFEF2F2,
-        dot: 0xD5DAE2,
-    };
-
-    const DARK: Self = Self {
-        bg: 0x17191E,
-        titlebar: 0x17191E,
-        toolbar: 0x1A1D23,
-        surface: 0x1C1F26,
-        canvas: 0x0F1217,
-        sidebar: 0x17191E,
-        border: 0x262A31,
-        border_strong: 0x363C47,
-        text: 0xE7EAF0,
-        text_secondary: 0xA7B0BF,
-        text_tertiary: 0x6F7A8B,
-        accent: 0x3B76F0,
-        accent_soft: 0x202A3D,
-        primary_hover: 0x4B85F5,
-        primary_active: 0x2F63D8,
-        window_control_hover: 0x23262D,
-        window_control_active: 0x2C3038,
-        window_close_hover: 0xDC454B,
-        window_close_active: 0xB83439,
-        search_match: 0xFFD666,
-        warning: 0xE0A64A,
-        error: 0xFF7A7A,
-        error_border: 0x7F3B3B,
-        error_soft: 0x2A1B1D,
-        dot: 0x3A424F,
-    };
-
-    fn for_mode(dark: bool) -> Self {
-        if dark { Self::DARK } else { Self::LIGHT }
-    }
-}
 
 /// Desktop entry name (packaging/linux/vofdreader.desktop) and the window
 /// app_id / WM_CLASS that lets the desktop find the application icon.
@@ -144,51 +53,23 @@ const CONTINUOUS_IDLE: Duration = Duration::from_millis(160);
 const SEARCH_HIGHLIGHT: u32 = 0xFFD54A80;
 const SEARCH_ACTIVE_HIGHLIGHT: u32 = 0xFF8A3D99;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ViewMode {
-    Single,
-    Continuous,
-}
-
-#[derive(Clone)]
-struct SearchHit {
-    page: usize,
-    /// Ordinal of this match within the page's `page_search_rects` list.
-    match_index: usize,
-    snippet: String,
-}
-
-/// Lightweight state kept for inactive tabs. Rendering resources are rebuilt
-/// from this snapshot when the tab becomes active again.
 #[derive(Clone)]
 struct DocumentTab {
     path: PathBuf,
     file_name: String,
-    page: usize,
-    zoom: f32,
-    rotation: u8,
-    view_mode: ViewMode,
-    search_open: bool,
-    search_query: String,
-    search_index: usize,
-    /// Vertical position inside the current page, as a 0..1 fraction.
-    page_offset: f32,
+    reading: ReadingSnapshot,
+    search: SearchSnapshot,
 }
 
 struct ReaderApp {
-    doc: Option<Arc<OfdDocument>>,
-    renderer: Option<Arc<PageRenderer>>,
-    file_path: Option<PathBuf>,
+    /// Document identity, metadata and per-document raster products.
+    active: app::active_document::ActiveDocument,
     pending_initial: Vec<PathBuf>,
     tabs: Vec<DocumentTab>,
     active_tab: Option<usize>,
     pending_restore_scroll: Option<f32>,
-    file_name: String,
-    file_size: u64,
     sidebar_open: bool,
     page: usize,
-    page_count: usize,
-    page_sizes: Vec<SizeMm>,
     zoom: f32,
     page_image: Option<Arc<RenderImage>>,
     view_mode: ViewMode,
@@ -196,14 +77,12 @@ struct ReaderApp {
     continuous_pending: HashSet<(usize, u32)>,
     continuous_failed: HashSet<(usize, u32)>,
     continuous_layout: RefCell<continuous::LayoutCache>,
-    page_sizes_revision: u64,
     continuous_last_scroll: Option<Instant>,
     /// Last continuous scroll offset and direction; prefetch goes ahead.
     last_scroll_y: f32,
     scroll_down: bool,
     continuous_settle_pending: bool,
     page_cache: HashMap<(usize, u32), Arc<RenderImage>>,
-    font_reports: HashMap<usize, Arc<ofd_core::FontRenderReport>>,
     page_cache_order: VecDeque<(usize, u32)>,
     page_cache_bytes: usize,
     cache_config: cache_config::CacheConfig,
@@ -219,39 +98,15 @@ struct ReaderApp {
     tile_failed: HashSet<tiles::Key>,
     page_coverage: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     render_seq: u64,
-    latest_render: Option<(u64, usize, u32)>,
+    latest_render: Option<app::render_policy::PageRequest>,
     dpi_debounce_gen: u64,
-    /// In-memory thumbnails (BGRA), registered with the GPU resources so a
-    /// document switch releases their atlas entries.
-    thumbs: Vec<Option<Arc<RenderImage>>>,
-    thumbs_started: bool,
-    search_open: bool,
-    search_input: Option<Entity<InputState>>,
-    search_query: String,
-    search_hits: Vec<SearchHit>,
-    search_index: usize,
-    search_results_scroll: ScrollHandle,
-    search_highlights: Vec<search_highlight::Highlight>,
-    search_active_highlight: Option<search_highlight::Highlight>,
-    search_suppress_change: bool,
-    search_pending_index: Option<(String, usize)>,
-    search_pending_input: Option<String>,
+    search: app::search_state::SearchState,
     page_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    text_layout: Option<PageTextLayout>,
-    selection_anchor: Option<usize>,
-    selection_focus: Option<usize>,
-    selection_rects: Vec<search_highlight::Highlight>,
-    selected_text: String,
-    selecting: bool,
-    selection_moved: bool,
-    page_text_cache: Option<Vec<Vec<String>>>,
+    selection: app::selection_state::SelectionState,
     recent: Vec<PathBuf>,
-    error: Option<String>,
     notice: Option<(String, bool)>,
     notice_generation: u64,
     exporting: bool,
-    loading: bool,
-    doc_generation: u64,
     focus_handle: FocusHandle,
     focused: bool,
     viewport: Size<Pixels>,
@@ -344,13 +199,18 @@ impl ReaderApp {
                 let mut warmed = false;
                 for _ in 0..100 {
                     let ready = this.update(cx, |this, _| {
-                        this.doc.is_some()
-                            && !this.loading
+                        this.active.is_open()
+                            && !this.active.loading
                             && this.latest_render.is_none()
                             && this.continuous_pending.is_empty()
                             && !this.tile_busy()
                             && this.gpu.borrow().stats.page_draws > 0
-                            && this.thumbs.iter().take(THUMB_LIMIT).all(Option::is_some)
+                            && this
+                                .active
+                                .thumbs
+                                .iter()
+                                .take(THUMB_LIMIT)
+                                .all(Option::is_some)
                     });
                     if matches!(ready, Ok(true)) {
                         warmed = true;
@@ -459,19 +319,13 @@ impl ReaderApp {
         gpu_options.no_page_shadows |= !settings.reading.page_shadows;
 
         Self {
-            doc: None,
-            renderer: None,
-            file_path: None,
+            active: app::active_document::ActiveDocument::empty(),
             pending_initial: initial,
             tabs: Vec::new(),
             active_tab: None,
             pending_restore_scroll: None,
-            file_name: String::new(),
-            file_size: 0,
             sidebar_open: settings.appearance.sidebar_open,
             page: 0,
-            page_count: 0,
-            page_sizes: Vec::new(),
             zoom: 1.0,
             page_image: None,
             view_mode: match settings.reading.default_view {
@@ -482,13 +336,11 @@ impl ReaderApp {
             continuous_pending: HashSet::new(),
             continuous_failed: HashSet::new(),
             continuous_layout: RefCell::new(continuous::LayoutCache::default()),
-            page_sizes_revision: 0,
             continuous_last_scroll: None,
             last_scroll_y: 0.0,
             scroll_down: true,
             continuous_settle_pending: false,
             page_cache: HashMap::new(),
-            font_reports: HashMap::new(),
             page_cache_order: VecDeque::new(),
             page_cache_bytes: 0,
             cache_config,
@@ -505,35 +357,13 @@ impl ReaderApp {
             render_seq: 0,
             latest_render: None,
             dpi_debounce_gen: 0,
-            thumbs: Vec::new(),
-            thumbs_started: false,
-            search_open: false,
-            search_input: None,
-            search_query: String::new(),
-            search_hits: Vec::new(),
-            search_index: 0,
-            search_results_scroll: ScrollHandle::new(),
-            search_highlights: Vec::new(),
-            search_active_highlight: None,
-            search_suppress_change: false,
-            search_pending_index: None,
-            search_pending_input: None,
+            search: app::search_state::SearchState::new(),
             page_bounds: Rc::new(Cell::new(None)),
-            text_layout: None,
-            selection_anchor: None,
-            selection_focus: None,
-            selection_rects: Vec::new(),
-            selected_text: String::new(),
-            selecting: false,
-            selection_moved: false,
-            page_text_cache: None,
+            selection: app::selection_state::SelectionState::new(),
             recent: recent::load_recent(settings.files.recent_limit),
-            error: None,
             notice: None,
             notice_generation: 0,
             exporting: false,
-            loading: false,
-            doc_generation: 0,
             focus_handle: cx.focus_handle(),
             focused: false,
             viewport,

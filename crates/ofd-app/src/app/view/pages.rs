@@ -60,7 +60,7 @@ impl ReaderApp {
             .bg(rgb(p.surface));
         if let Some(image) = image {
             card = card.child(self.page_texture(image));
-        } else if let Some(image) = self.thumbs.get(index).and_then(Option::as_ref) {
+        } else if let Some(image) = self.active.thumbs.get(index).and_then(Option::as_ref) {
             card = card.child(img(image.clone()).absolute().size_full());
         } else {
             card = card.child(
@@ -91,21 +91,21 @@ impl ReaderApp {
                     .absolute()
                     .size_full(),
                 );
-            if !self.search_highlights.is_empty() {
+            if !self.search.highlights.is_empty() {
                 card = card.child(overlay_layer(
-                    self.search_highlights.clone(),
+                    self.search.highlights.clone(),
                     rgba(SEARCH_HIGHLIGHT),
                 ));
             }
-            if let Some(active) = &self.search_active_highlight {
+            if let Some(active) = &self.search.active_highlight {
                 card = card.child(overlay_layer(
                     vec![active.clone()],
                     rgba(SEARCH_ACTIVE_HIGHLIGHT),
                 ));
             }
-            if !self.selection_rects.is_empty() {
+            if !self.selection.rects.is_empty() {
                 card = card.child(overlay_layer(
-                    self.selection_rects.clone(),
+                    self.selection.rects.clone(),
                     rgba(0x2F6FEB55),
                 ));
             }
@@ -126,9 +126,10 @@ impl ReaderApp {
     pub(crate) fn page_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette();
         let handle = self.grid_scroll.clone();
-        let mut cards = Vec::with_capacity(self.page_count);
-        for index in 0..self.page_count {
+        let mut cards = Vec::with_capacity(self.active.page_count());
+        for index in 0..self.active.page_count() {
             let size = self
+                .active
                 .page_sizes
                 .get(index)
                 .copied()
@@ -146,7 +147,7 @@ impl ReaderApp {
                 .border_color(rgb(if current { p.accent } else { p.border }))
                 .bg(rgb(p.surface))
                 .shadow_sm();
-            if let Some(image) = self.thumbs.get(index).and_then(Option::as_ref) {
+            if let Some(image) = self.active.thumbs.get(index).and_then(Option::as_ref) {
                 thumb = thumb.child(img(image.clone()).absolute().size_full());
             } else {
                 thumb = thumb.child(
@@ -213,7 +214,7 @@ impl ReaderApp {
                                 div()
                                     .text_size(px(10.5))
                                     .text_color(rgb(p.text_tertiary))
-                                    .child(format!("共 {} 页", self.page_count)),
+                                    .child(format!("共 {} 页", self.active.page_count())),
                             ),
                     )
                     .child(div().flex().flex_wrap().gap_4().children(cards)),
@@ -258,7 +259,7 @@ impl ReaderApp {
                     image
                 });
             let height = self.continuous_page_size(viewport, index).1;
-            let gap = if index + 1 < self.page_count {
+            let gap = if index + 1 < self.active.page_count() {
                 page_gap
             } else {
                 0.0
@@ -308,6 +309,7 @@ impl ReaderApp {
     pub(crate) fn tile_layer(&self, page: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let dpi = self.tile_density(page);
         let size = self
+            .active
             .page_sizes
             .get(page)
             .copied()
@@ -315,7 +317,7 @@ impl ReaderApp {
         let cache = self.tile_cache.clone();
         let gpu = self.gpu.clone();
         let entity = cx.entity().downgrade();
-        let generation = self.doc_generation;
+        let generation = self.active.generation;
         let view_generation = self.view_generation;
         let rotation = self.rotation;
         let ring = self.cache_config.prefetch_tile_ring();
@@ -352,7 +354,7 @@ impl ReaderApp {
                 let wanted = keys.clone();
                 cx.defer(move |cx| {
                     let _ = entity.update(cx, |this, _| {
-                        if this.doc_generation == generation
+                        if this.active.generation == generation
                             && this.view_generation == view_generation
                         {
                             for key in &wanted {
@@ -370,7 +372,7 @@ impl ReaderApp {
                     // block on page B just because A's callback ran first.
                     cx.defer(move |cx| {
                         let _ = entity.update(cx, |this, cx| {
-                            if this.doc_generation == generation
+                            if this.active.generation == generation
                                 && this.view_generation == view_generation
                             {
                                 this.schedule_nearby(cx);

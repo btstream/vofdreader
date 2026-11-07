@@ -74,12 +74,12 @@ impl ReaderApp {
         if self.exporting {
             return;
         }
-        let Some(doc) = self.doc.clone() else {
+        let Some(doc) = self.active.doc.clone() else {
             self.set_notice("请先打开 OFD 文档", true, cx);
             cx.notify();
             return;
         };
-        let Some(renderer) = self.renderer.clone() else {
+        let Some(renderer) = self.active.renderer.clone() else {
             self.set_notice("文档渲染器尚未就绪", true, cx);
             cx.notify();
             return;
@@ -87,14 +87,16 @@ impl ReaderApp {
 
         let page = self.page;
         let directory = self
-            .file_path
+            .active
+            .path
             .as_deref()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let stem = self
-            .file_path
+            .active
+            .path
             .as_deref()
             .and_then(Path::file_stem)
             .map(|stem| stem.to_string_lossy().into_owned())
@@ -249,7 +251,7 @@ impl ReaderApp {
             cx.stop_propagation();
             return;
         }
-        if self.search_open {
+        if self.search.open {
             match key {
                 "escape" => self.close_search(window, cx),
                 "up" => self.search_step(-1, cx),
@@ -263,7 +265,10 @@ impl ReaderApp {
                 self.grid_open = false;
                 cx.notify();
             } else if key == "down" || key == "j" {
-                self.go_to_page((self.page + 1).min(self.page_count.saturating_sub(1)), cx);
+                self.go_to_page(
+                    (self.page + 1).min(self.active.page_count().saturating_sub(1)),
+                    cx,
+                );
             } else if key == "up" || key == "k" {
                 self.go_to_page(self.page.saturating_sub(1), cx);
             }
@@ -273,7 +278,7 @@ impl ReaderApp {
             self.copy_selection(cx);
             return;
         }
-        if !modifiers.control && !modifiers.platform && !modifiers.alt && self.doc.is_some() {
+        if !modifiers.control && !modifiers.platform && !modifiers.alt && self.active.is_open() {
             match key {
                 "r" => {
                     self.rotate_view(cx);
@@ -286,7 +291,7 @@ impl ReaderApp {
                 _ => {}
             }
         }
-        if key == "escape" && self.selection_anchor.is_some() {
+        if key == "escape" && !self.selection.is_empty() {
             self.clear_selection();
             cx.notify();
             return;
@@ -307,7 +312,7 @@ impl ReaderApp {
                 }
                 "end" => {
                     self.continuous_scroll.scroll_to_bottom();
-                    self.go_to_page(self.page_count.saturating_sub(1), cx);
+                    self.go_to_page(self.active.page_count().saturating_sub(1), cx);
                 }
                 "=" | "+" => self.set_zoom(self.zoom + 0.25, cx),
                 "-" | "_" => self.set_zoom(self.zoom - 0.25, cx),
@@ -320,7 +325,7 @@ impl ReaderApp {
             "pagedown" | "right" | "down" | "j" | "space" if !modifiers.shift => self.next_page(cx),
             "pageup" | "left" | "up" | "k" | "space" => self.prev_page(cx),
             "home" => self.go_to_page(0, cx),
-            "end" => self.go_to_page(self.page_count.saturating_sub(1), cx),
+            "end" => self.go_to_page(self.active.page_count().saturating_sub(1), cx),
             "=" | "+" => self.set_zoom(self.zoom + 0.25, cx),
             "-" | "_" => self.set_zoom(self.zoom - 0.25, cx),
             "0" => self.set_zoom(1.0, cx),
@@ -339,7 +344,7 @@ impl ReaderApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+        if self.selection.dragging && event.pressed_button == Some(MouseButton::Left) {
             self.update_selection_drag(event.position, cx);
         }
         if self
@@ -349,7 +354,7 @@ impl ReaderApp {
             return;
         }
         self.bar_pointer = Some(event.position);
-        if self.doc.is_some()
+        if self.active.is_open()
             && self.settings.reading.floating_toolbar
             && self
                 .reader_bounds
@@ -368,7 +373,7 @@ impl ReaderApp {
             self.bar_visible = true;
             cx.notify();
         }
-        if self.bar_watchdog || self.doc.is_none() {
+        if self.bar_watchdog || !self.active.is_open() {
             return;
         }
 
@@ -379,7 +384,7 @@ impl ReaderApp {
                     .timer(Duration::from_millis(300))
                     .await;
                 let keep_running = this.update(cx, |this, cx| {
-                    if this.doc.is_none() || !this.bar_visible {
+                    if !this.active.is_open() || !this.bar_visible {
                         this.bar_visible = false;
                         this.bar_hovered = false;
                         this.bar_watchdog = false;

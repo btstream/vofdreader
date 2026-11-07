@@ -8,7 +8,7 @@ use crate::*;
 impl Render for ReaderApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette();
-        if let Some(value) = self.search_pending_input.take() {
+        if let Some(value) = self.search.pending_input.take() {
             cx.defer_in(window, move |this, window, cx| {
                 this.set_search_input_value(window, &value, cx);
                 cx.notify();
@@ -50,17 +50,17 @@ impl Render for ReaderApp {
         if self.view_mode == ViewMode::Single {
             self.pending_restore_page = None;
         }
-        if self.doc.is_some()
+        if self.active.is_open()
             && self.view_mode == ViewMode::Continuous
             && !self.grid_open
             && self.pending_restore_page.is_none()
         {
             self.sync_continuous_page(self.viewport, cx);
         }
-        if self.doc.is_some()
+        if self.active.is_open()
             && !self.grid_open
             && self.view_mode == ViewMode::Single
-            && !self.loading
+            && !self.active.loading
             && !self.dpi_pending
             && self.target_dpi() > self.image_dpi
         {
@@ -69,17 +69,17 @@ impl Render for ReaderApp {
         // Defensive recovery: the document is open but no frame is displayed.
         // This can happen after switching documents while a stale image_dpi is
         // still around; never show the "open a file" state in that case.
-        if self.doc.is_some()
+        if self.active.is_open()
             && !self.grid_open
             && self.view_mode == ViewMode::Single
             && self.page_image.is_none()
-            && !self.loading
-            && self.error.is_none()
-            && self.renderer.is_some()
+            && !self.active.loading
+            && self.active.error.is_none()
+            && self.active.renderer.is_some()
         {
             self.request_page_render(cx);
         }
-        let page = if self.grid_open && self.doc.is_some() {
+        let page = if self.grid_open && self.active.is_open() {
             self.page_grid(cx)
         } else if self.view_mode == ViewMode::Continuous {
             self.continuous_view(self.viewport, cx)
@@ -112,26 +112,26 @@ impl Render for ReaderApp {
                         .absolute()
                         .size_full(),
                     );
-                if !self.search_highlights.is_empty() {
+                if !self.search.highlights.is_empty() {
                     stack = stack.child(overlay_layer(
-                        self.search_highlights.clone(),
+                        self.search.highlights.clone(),
                         rgba(SEARCH_HIGHLIGHT),
                     ));
                 }
-                if let Some(active) = &self.search_active_highlight {
+                if let Some(active) = &self.search.active_highlight {
                     stack = stack.child(overlay_layer(
                         vec![active.clone()],
                         rgba(SEARCH_ACTIVE_HIGHLIGHT),
                     ));
                 }
-                if !self.selection_rects.is_empty() {
+                if !self.selection.rects.is_empty() {
                     stack = stack.child(overlay_layer(
-                        self.selection_rects.clone(),
+                        self.selection.rects.clone(),
                         rgba(0x2F6FEB55),
                     ));
                 }
                 stack.into_any_element()
-            } else if let Some(error) = &self.error {
+            } else if let Some(error) = &self.active.error {
                 div()
                     .max_w(px(560.0))
                     .p_6()
@@ -143,7 +143,7 @@ impl Render for ReaderApp {
                     .text_color(rgb(p.error))
                     .children(error.lines().map(|line| div().child(line.to_string())))
                     .into_any_element()
-            } else if self.loading || self.doc.is_some() {
+            } else if self.active.loading || self.active.is_open() {
                 div()
                     .flex()
                     .flex_col()
@@ -264,15 +264,15 @@ impl Render for ReaderApp {
                 .size_full(),
             );
 
-        if self.doc.is_some() && self.settings.reading.floating_toolbar && self.bar_visible {
+        if self.active.is_open() && self.settings.reading.floating_toolbar && self.bar_visible {
             canvas = canvas.child(self.floating_bar(cx, window.viewport_size()));
         }
-        if self.search_open {
+        if self.search.open {
             canvas = canvas.child(self.search_panel(cx));
         }
         // Only on-screen pages: background prefetch neither shows the badge
         // nor needs a repaint to hide it again.
-        if self.loading
+        if self.active.loading
             || (self.view_mode == ViewMode::Continuous
                 && self
                     .continuous_pending
@@ -309,7 +309,7 @@ impl Render for ReaderApp {
         }
         let reading = reading.child(canvas);
 
-        let body = if self.doc.is_some() && self.sidebar_open {
+        let body = if self.active.is_open() && self.sidebar_open {
             div()
                 .flex_1()
                 .flex()
